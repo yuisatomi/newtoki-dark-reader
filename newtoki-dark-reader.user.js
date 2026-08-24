@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         뉴토끼 다크 리더 (본문 전용 뷰어)
 // @namespace    nt-dark-reader
-// @version      4.5
+// @version      4.6
 // @description  뉴토끼 소설/웹툰: 플로팅 버튼으로 다크 뷰어 진입. 도메인이 바뀌어도 자동 인식 + 메뉴에서 도메인 직접 추가 가능
 // @homepageURL  https://github.com/yuisatomi/newtoki-dark-reader
 // @updateURL    https://raw.githubusercontent.com/yuisatomi/newtoki-dark-reader/main/newtoki-dark-reader.user.js
