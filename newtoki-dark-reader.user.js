@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         뉴토끼 다크 리더 (본문 전용 뷰어)
 // @namespace    nt-dark-reader
-// @version      4.6
+// @version      4.7
 // @description  뉴토끼 소설/웹툰: 플로팅 버튼으로 다크 뷰어 진입. 도메인이 바뀌어도 자동 인식 + 메뉴에서 도메인 직접 추가 가능
 // @homepageURL  https://github.com/yuisatomi/newtoki-dark-reader
 // @updateURL    https://raw.githubusercontent.com/yuisatomi/newtoki-dark-reader/main/newtoki-dark-reader.user.js
@@ -304,15 +304,15 @@
 
   const style = document.createElement('style');
   style.textContent = `
-    html, body { margin:0 !important; padding:0 !important; background:#0d1117 !important; }
+    html, body { margin:0 !important; padding:0 !important; background:var(--nt-bg, #0d1117) !important; }
     #nt-dark-root {
       max-width: var(--nt-width, 720px); margin: 0 auto; padding: 24px 20px 160px;
-      background:#0d1117; color:#d7dde7;
+      background:var(--nt-bg, #0d1117); color:var(--nt-text, #d7dde7);
       font-family: 'Noto Sans KR', 'Malgun Gothic', sans-serif;
       font-size: var(--nt-font, 18px); line-height: var(--nt-lh, 2.0); letter-spacing: 0.01em;
     }
     #nt-dark-root .nt-title {
-      font-size: calc(var(--nt-font, 18px) * 1.25); font-weight: 700; color:#e6edf3;
+      font-size: calc(var(--nt-font, 18px) * 1.25); font-weight: 700; color:var(--nt-title, #e6edf3);
       padding-bottom: 14px; margin-bottom: 22px;
       border-bottom: 1px solid #21262d;
     }
@@ -328,7 +328,7 @@
     #nt-dark-root .nt-body img { max-width: 100%; height: auto; display: block; margin: 0 auto 8px; }
     #nt-dark-root .nt-body a { color:#58a6ff; }
     #nt-dark-root .nt-body, #nt-dark-root .nt-body * {
-      background: transparent !important; color: #d7dde7 !important;
+      background: transparent !important; color: var(--nt-text, #d7dde7) !important;
       border-color: #21262d !important; text-shadow: none !important;
       font-size: inherit !important; line-height: var(--nt-lh, 2.0) !important;
     }
@@ -393,16 +393,25 @@
 
   if (!isNovelEp) root.classList.add('nt-webtoon');
 
-  const DEFAULTS = { font: 18, width: 720, lh: 2.0 };
+  const DEFAULTS = { font: 18, width: 720, lh: 2.0, warm: 45 };
   let cfg = DEFAULTS;
   try {
     const saved = localStorage.getItem('ntDarkReaderCfg');
     if (saved) cfg = Object.assign({}, DEFAULTS, JSON.parse(saved));
   } catch (e) {}
   function applyCfg() {
+    cfg.warm = Math.max(0, Math.min(100, Number(cfg.warm) || 0));
+    const bg = `color-mix(in srgb, #0d1117, #1b1208 ${cfg.warm}%)`;
+    const text = `color-mix(in srgb, #d7dde7, #d8b98a ${cfg.warm}%)`;
+    const title = `color-mix(in srgb, #e6edf3, #ead0a8 ${cfg.warm}%)`;
     root.style.setProperty('--nt-font', cfg.font + 'px');
     root.style.setProperty('--nt-width', cfg.width + 'px');
     root.style.setProperty('--nt-lh', cfg.lh);
+    root.style.setProperty('--nt-bg', bg);
+    root.style.setProperty('--nt-text', text);
+    root.style.setProperty('--nt-title', title);
+    document.documentElement.style.setProperty('--nt-bg', bg);
+    bodyEl.style.setProperty('--theme-novel-text-color', text);
   }
   applyCfg();
 
@@ -504,6 +513,10 @@
       <label>줄 간격 <span class="val" data-v="lh"></span></label>
       <input type="range" id="nt-lh" min="1.4" max="3" step="0.1">
     </div>
+    <div class="row">
+      <label>따뜻한 색감 <span class="val" data-v="warm"></span></label>
+      <input type="range" id="nt-warm" min="0" max="100" step="5">
+    </div>
     <div class="btns"><button id="nt-reset">기본값</button><button id="nt-close">닫기</button></div>
   `;
   document.body.appendChild(panel);
@@ -512,9 +525,11 @@
     panel.querySelector('#nt-f').value = cfg.font;
     panel.querySelector('#nt-w').value = cfg.width;
     panel.querySelector('#nt-lh').value = cfg.lh;
+    panel.querySelector('#nt-warm').value = cfg.warm;
     panel.querySelector('[data-v=font]').textContent = cfg.font + 'px';
     panel.querySelector('[data-v=width]').textContent = cfg.width + 'px';
     panel.querySelector('[data-v=lh]').textContent = cfg.lh.toFixed(1);
+    panel.querySelector('[data-v=warm]').textContent = cfg.warm + '%';
   }
   syncPanel();
 
@@ -525,6 +540,7 @@
   panel.querySelector('#nt-f').addEventListener('input', e => { cfg.font = +e.target.value; saveCfg(); });
   panel.querySelector('#nt-w').addEventListener('input', e => { cfg.width = +e.target.value; saveCfg(); });
   panel.querySelector('#nt-lh').addEventListener('input', e => { cfg.lh = +e.target.value; saveCfg(); });
+  panel.querySelector('#nt-warm').addEventListener('input', e => { cfg.warm = +e.target.value; saveCfg(); });
   panel.querySelector('#nt-reset').addEventListener('click', () => { cfg = Object.assign({}, DEFAULTS); saveCfg(); });
   panel.querySelector('#nt-close').addEventListener('click', () => panel.classList.remove('open'));
   gear.addEventListener('click', e => { e.stopPropagation(); panel.classList.toggle('open'); });
