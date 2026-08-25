@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         뉴토끼 다크 리더 (본문 전용 뷰어)
 // @namespace    nt-dark-reader
-// @version      4.8
+// @version      4.9
 // @description  뉴토끼 소설/웹툰: 야간 다크/주간 종이색 본문 뷰어. 도메인이 바뀌어도 자동 인식 + 메뉴에서 도메인 직접 추가 가능
 // @homepageURL  https://github.com/yuisatomi/newtoki-dark-reader
 // @updateURL    https://raw.githubusercontent.com/yuisatomi/newtoki-dark-reader/main/newtoki-dark-reader.user.js
@@ -370,7 +370,7 @@
     #nt-dark-nav a, #nt-dark-nav button {
       min-width: 0; flex: 1 1 auto; max-width: 150px;
       padding: 9px 14px; border-radius: 8px;
-      border: 1px solid var(--nt-border, #30363d); background:var(--nt-surface, #161b22); color:var(--nt-title, #e6edf3);
+      border: 1px solid var(--nt-border, #30363d); background:var(--nt-button, #21262d); color:var(--nt-title, #e6edf3);
       font-size: 15px; cursor: pointer; text-align:center; text-decoration:none;
       white-space: nowrap;
     }
@@ -383,7 +383,7 @@
       }
       #nt-dark-nav .nt-label { display:none; }   /* 라벨 숨기고 아이콘만 */
     }
-    #nt-dark-nav a.primary { background:var(--nt-primary, #1f6feb); border-color:var(--nt-primary, #1f6feb); color:#fff; font-weight:700; }
+    #nt-dark-nav .primary { background:var(--nt-primary, #1f6feb); border-color:var(--nt-primary, #1f6feb); color:#fff; font-weight:700; }
     #nt-dark-nav a.origin { border-color:var(--nt-accent, #238636); color:var(--nt-accent, #3fb950); }
     #nt-dark-nav a:disabled, #nt-dark-nav button:disabled { opacity:.35; cursor:default; }
     #nt-dark-nav .nt-pos { color:var(--nt-muted, #8b949e); font-size:13px; margin:0 6px; }
@@ -413,8 +413,8 @@
       ? `color-mix(in srgb, #1f1b17, #3f2b17 ${cfg.warm}%)`
       : `color-mix(in srgb, #e6edf3, #ead0a8 ${cfg.warm}%)`;
     const ui = paper
-      ? { surface: '#e8dcc6', border: '#cbb996', muted: '#756855', accent: '#76512c', primary: '#8a5a2b', nav: 'rgba(242,232,213,.94)' }
-      : { surface: '#161b22', border: '#30363d', muted: '#8b949e', accent: '#58a6ff', primary: '#1f6feb', nav: 'rgba(13,17,23,.92)' };
+      ? { surface: '#e8dcc6', button: '#f5ead5', border: '#cbb996', muted: '#756855', accent: '#76512c', primary: '#8a5a2b', nav: 'rgba(242,232,213,.94)' }
+      : { surface: '#161b22', button: '#21262d', border: '#30363d', muted: '#8b949e', accent: '#58a6ff', primary: '#1f6feb', nav: 'rgba(13,17,23,.92)' };
     root.style.setProperty('--nt-font', cfg.font + 'px');
     root.style.setProperty('--nt-width', cfg.width + 'px');
     root.style.setProperty('--nt-lh', cfg.lh);
@@ -508,7 +508,7 @@
       #nt-dark-panel.open { display:block; }
       #nt-dark-panel .row { margin-bottom:12px; }
       #nt-dark-panel label { display:flex; justify-content:space-between; margin-bottom:4px; color:var(--nt-muted, #8b949e); }
-      #nt-dark-panel input[type=range] { width:100%; }
+      #nt-dark-panel input[type=range] { width:100%; accent-color:var(--nt-primary, #1f6feb); }
       #nt-dark-panel .val { color:var(--nt-accent, #58a6ff); font-weight:700; }
       #nt-dark-panel .presets { display:flex; gap:8px; margin-bottom:14px; }
       #nt-dark-panel .presets button { flex:1; }
@@ -516,7 +516,7 @@
       #nt-dark-panel .btns { display:flex; gap:8px; justify-content:flex-end; margin-top:4px; }
       #nt-dark-panel button {
         padding:6px 12px; border-radius:6px; border:1px solid var(--nt-border, #30363d);
-        background:var(--nt-surface, #21262d); color:var(--nt-title, #e6edf3); cursor:pointer; font-size:12px;
+        background:var(--nt-button, #21262d); color:var(--nt-title, #e6edf3); cursor:pointer; font-size:12px;
       }
     </style>
     <div class="presets">
