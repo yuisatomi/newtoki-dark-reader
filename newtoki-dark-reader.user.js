@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         뉴토끼 다크 리더 (본문 전용 뷰어)
 // @namespace    nt-dark-reader
-// @version      4.9
+// @version      5.0
 // @description  뉴토끼 소설/웹툰: 야간 다크/주간 종이색 본문 뷰어. 도메인이 바뀌어도 자동 인식 + 메뉴에서 도메인 직접 추가 가능
 // @homepageURL  https://github.com/yuisatomi/newtoki-dark-reader
 // @updateURL    https://raw.githubusercontent.com/yuisatomi/newtoki-dark-reader/main/newtoki-dark-reader.user.js
@@ -422,6 +422,8 @@
     root.style.setProperty('--nt-text', text);
     root.style.setProperty('--nt-title', title);
     document.documentElement.style.setProperty('--nt-bg', bg);
+    document.documentElement.style.setProperty('--nt-text', text);
+    document.documentElement.style.setProperty('--nt-title', title);
     Object.entries(ui).forEach(([name, value]) => {
       root.style.setProperty('--nt-' + (name === 'nav' ? 'nav-bg' : name), value);
       document.documentElement.style.setProperty('--nt-' + (name === 'nav' ? 'nav-bg' : name), value);
