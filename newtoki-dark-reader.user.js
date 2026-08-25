@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         뉴토끼 다크 리더 (본문 전용 뷰어)
 // @namespace    nt-dark-reader
-// @version      5.2
+// @version      5.3
 // @description  뉴토끼 소설/웹툰: 야간 다크/주간 종이색 본문 뷰어와 기기 간 읽기 위치 동기화
 // @homepageURL  https://github.com/yuisatomi/newtoki-dark-reader
 // @updateURL    https://raw.githubusercontent.com/yuisatomi/newtoki-dark-reader/main/newtoki-dark-reader.user.js
@@ -12,7 +12,7 @@
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_xmlhttpRequest
-// @connect      192.168.100.118
+// @connect      reader-sync.flolim.com
 // ==/UserScript==
 
 (function () {
@@ -25,7 +25,7 @@
      ============================================================ */
   const USER_DOMAINS_KEY = 'ntReaderUserDomains';
   const READER_CFG_KEY = 'ntDarkReaderCfg';
-  const SYNC_URL = 'http://192.168.100.118:8787';
+  const SYNC_URL = 'https://reader-sync.flolim.com';
   const SYNC_TOKEN_KEY = 'ntReaderSyncToken';
   const DEVICE_ID_KEY = 'ntReaderDeviceId';
 
