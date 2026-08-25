@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         뉴토끼 다크 리더 (본문 전용 뷰어)
 // @namespace    nt-dark-reader
-// @version      5.0
+// @version      5.1
 // @description  뉴토끼 소설/웹툰: 야간 다크/주간 종이색 본문 뷰어. 도메인이 바뀌어도 자동 인식 + 메뉴에서 도메인 직접 추가 가능
 // @homepageURL  https://github.com/yuisatomi/newtoki-dark-reader
 // @updateURL    https://raw.githubusercontent.com/yuisatomi/newtoki-dark-reader/main/newtoki-dark-reader.user.js
@@ -22,6 +22,7 @@
      - 사용자가 추가한 도메인 → GM_setValue로 영구 저장
      ============================================================ */
   const USER_DOMAINS_KEY = 'ntReaderUserDomains';
+  const READER_CFG_KEY = 'ntDarkReaderCfg';
 
   function getUserDomains() {
     try { return GM_getValue(USER_DOMAINS_KEY, []) || []; } catch (e) { return []; }
@@ -275,6 +276,13 @@
     listUrl = findNavBtn('목록') || listUrl;
     titleText = titleEl ? titleEl.textContent.trim() : document.title;
     buildViewer();   // 아래 정의된 실제 뷰어 구성 함수
+
+    // 본문을 실제로 표시한 뒤에만 읽은 회차로 기록한다.
+    try {
+      const wm = path.match(/^\/(webtoon|novel)\/([^/]+)\//);
+      const ep = path.split('/').filter(Boolean).pop();
+      if (wm && ep) localStorage.setItem('ntRead:' + wm[1] + ':' + wm[2], ep);
+    } catch (e) {}
   }
 
   function findNavBtn(label) {
@@ -287,13 +295,6 @@
   let nextUrl = findNavBtn('다음화');
   let listUrl = findNavBtn('목록');
   let titleText = titleEl ? titleEl.textContent.trim() : document.title;
-
-  /* P3: 읽은 회차 기록 (목록 페이지에서 흐리게 표시용) */
-  try {
-    const wm = path.match(/^\/(webtoon|novel)\/([^/]+)\//);
-    const ep = path.split('/').filter(Boolean).pop();
-    if (wm && ep) localStorage.setItem('ntRead:' + wm[1] + ':' + wm[2], ep);
-  } catch (e) {}
 
   /* ---------- 실제 뷰어 구성 (본문 준비 완료 후 호출) ---------- */
   function buildViewer() {
@@ -395,11 +396,27 @@
 
   const DEFAULTS = { font: 18, width: 720, lh: 2.0, warm: 45, theme: 'dark' };
   let cfg = Object.assign({}, DEFAULTS);
+  let savedCfg = null;
   try {
-    const saved = localStorage.getItem('ntDarkReaderCfg');
-    if (saved) cfg = Object.assign({}, DEFAULTS, JSON.parse(saved));
+    savedCfg = GM_getValue(READER_CFG_KEY, null);
   } catch (e) {}
+  if (!savedCfg || typeof savedCfg !== 'object' || Array.isArray(savedCfg)) {
+    try {
+      const legacy = localStorage.getItem(READER_CFG_KEY);
+      if (legacy) savedCfg = JSON.parse(legacy);
+    } catch (e) {}
+  }
+  if (savedCfg && typeof savedCfg === 'object' && !Array.isArray(savedCfg)) {
+    cfg = Object.assign({}, DEFAULTS, savedCfg);
+  }
+  function persistCfg() {
+    try { GM_setValue(READER_CFG_KEY, cfg); } catch (e) {}
+    try { localStorage.setItem(READER_CFG_KEY, JSON.stringify(cfg)); } catch (e) {}
+  }
   function applyCfg() {
+    cfg.font = Math.max(12, Math.min(32, Number(cfg.font) || DEFAULTS.font));
+    cfg.width = Math.max(360, Math.min(1400, Number(cfg.width) || DEFAULTS.width));
+    cfg.lh = Math.max(1.4, Math.min(3, Number(cfg.lh) || DEFAULTS.lh));
     cfg.warm = Math.max(0, Math.min(100, Number(cfg.warm) || 0));
     cfg.theme = cfg.theme === 'paper' ? 'paper' : 'dark';
     const paper = cfg.theme === 'paper';
@@ -431,6 +448,7 @@
     bodyEl.style.setProperty('--theme-novel-text-color', text);
   }
   applyCfg();
+  persistCfg();   // 기존 도메인 설정을 GM 저장소로 이전하고 롤백용 사본 유지
 
   const h1 = document.createElement('div');
   h1.className = 'nt-title';
@@ -562,7 +580,7 @@
 
   function saveCfg() {
     applyCfg(); syncPanel();
-    try { localStorage.setItem('ntDarkReaderCfg', JSON.stringify(cfg)); } catch (e) {}
+    persistCfg();
   }
   panel.querySelector('#nt-f').addEventListener('input', e => { cfg.font = +e.target.value; saveCfg(); });
   panel.querySelector('#nt-w').addEventListener('input', e => { cfg.width = +e.target.value; saveCfg(); });
@@ -649,6 +667,8 @@
   document.addEventListener('click', e => {
     if (e.target.closest('#nt-dark-nav') || e.target.closest('#nt-dark-panel')) return;
     if (!isNovelEp && e.target.closest('.nt-body')) return;
+    if (e.defaultPrevented || e.target.closest('a, button, input, select, textarea, label, [contenteditable="true"]')) return;
+    if ((window.getSelection()?.toString() || '').trim()) return;
     const x = e.clientX / window.innerWidth;
     if (x < 0.15) go(prevUrl);
     else if (x > 0.85) go(nextUrl);
