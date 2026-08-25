@@ -394,7 +394,7 @@
   if (!isNovelEp) root.classList.add('nt-webtoon');
 
   const DEFAULTS = { font: 18, width: 720, lh: 2.0, warm: 45 };
-  let cfg = DEFAULTS;
+  let cfg = Object.assign({}, DEFAULTS);
   try {
     const saved = localStorage.getItem('ntDarkReaderCfg');
     if (saved) cfg = Object.assign({}, DEFAULTS, JSON.parse(saved));
