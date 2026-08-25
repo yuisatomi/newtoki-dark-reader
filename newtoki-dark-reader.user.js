@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         뉴토끼 다크 리더 (본문 전용 뷰어)
 // @namespace    nt-dark-reader
-// @version      5.1
-// @description  뉴토끼 소설/웹툰: 야간 다크/주간 종이색 본문 뷰어. 도메인이 바뀌어도 자동 인식 + 메뉴에서 도메인 직접 추가 가능
+// @version      5.2
+// @description  뉴토끼 소설/웹툰: 야간 다크/주간 종이색 본문 뷰어와 기기 간 읽기 위치 동기화
 // @homepageURL  https://github.com/yuisatomi/newtoki-dark-reader
 // @updateURL    https://raw.githubusercontent.com/yuisatomi/newtoki-dark-reader/main/newtoki-dark-reader.user.js
 // @downloadURL  https://raw.githubusercontent.com/yuisatomi/newtoki-dark-reader/main/newtoki-dark-reader.user.js
@@ -11,6 +11,8 @@
 // @grant        GM_registerMenuCommand
 // @grant        GM_setValue
 // @grant        GM_getValue
+// @grant        GM_xmlhttpRequest
+// @connect      192.168.100.118
 // ==/UserScript==
 
 (function () {
@@ -23,6 +25,49 @@
      ============================================================ */
   const USER_DOMAINS_KEY = 'ntReaderUserDomains';
   const READER_CFG_KEY = 'ntDarkReaderCfg';
+  const SYNC_URL = 'http://192.168.100.118:8787';
+  const SYNC_TOKEN_KEY = 'ntReaderSyncToken';
+  const DEVICE_ID_KEY = 'ntReaderDeviceId';
+
+  function getSyncToken() {
+    try { return String(GM_getValue(SYNC_TOKEN_KEY, '') || '').trim(); } catch (e) { return ''; }
+  }
+  function getDeviceId() {
+    try {
+      let id = GM_getValue(DEVICE_ID_KEY, '');
+      if (!id) {
+        id = typeof crypto.randomUUID === 'function'
+          ? crypto.randomUUID()
+          : 'device-' + Date.now() + '-' + Math.random().toString(36).slice(2);
+        GM_setValue(DEVICE_ID_KEY, id);
+      }
+      return id;
+    } catch (e) { return 'unknown'; }
+  }
+  function syncRequest(method, route, data) {
+    const token = getSyncToken();
+    if (!token || typeof GM_xmlhttpRequest !== 'function') return Promise.reject(new Error('동기화 토큰 없음'));
+    return new Promise((resolve, reject) => GM_xmlhttpRequest({
+      method,
+      url: SYNC_URL + route,
+      headers: {
+        Authorization: 'Bearer ' + token,
+        ...(data ? { 'Content-Type': 'application/json' } : {})
+      },
+      data: data ? JSON.stringify(data) : undefined,
+      timeout: 5000,
+      onload: response => {
+        if (response.status < 200 || response.status >= 300) {
+          reject(new Error('서버 응답 ' + response.status));
+          return;
+        }
+        try { resolve(response.responseText ? JSON.parse(response.responseText) : {}); }
+        catch (e) { reject(new Error('잘못된 서버 응답')); }
+      },
+      onerror: () => reject(new Error('서버 연결 실패')),
+      ontimeout: () => reject(new Error('서버 연결 시간 초과'))
+    }));
+  }
 
   function getUserDomains() {
     try { return GM_getValue(USER_DOMAINS_KEY, []) || []; } catch (e) { return []; }
@@ -66,8 +111,21 @@
   const isWebtoonEp = /^\/webtoon\/[^/]+\/[^/]+/.test(path) && /\d/.test(path.split('/').pop() || '');
   // 작품 ID가 숫자든 slug든 관계없이 "카테고리/작품/회차" 3단 구조 + 회차 ID에 숫자 포함이면 회차 페이지로 인식
   const isEpisodePage = isNovelEp || isWebtoonEp;
+  const episodeMatch = path.match(/^\/(webtoon|novel)\/([A-Za-z0-9_-]+)\/([A-Za-z0-9_-]+)/);
+  const episodeInfo = episodeMatch ? {
+    kind: episodeMatch[1], workId: episodeMatch[2], episodeId: episodeMatch[3]
+  } : null;
   const VIEW_FLAG = 'ntDarkReaderOn';
   const VIEW_FLAG_TS = 'ntDarkReaderOnTs';
+  const SYNC_NAV_TARGET_KEY = 'ntReaderSyncNavTarget';
+
+  function rememberNavigationTarget(url) {
+    try {
+      const targetPath = new URL(url, location.href).pathname;
+      const target = targetPath.match(/^\/(webtoon|novel)\/([A-Za-z0-9_-]+)\/([A-Za-z0-9_-]+)/);
+      if (target) sessionStorage.setItem(SYNC_NAV_TARGET_KEY, target[1] + ':' + target[2] + ':' + target[3]);
+    } catch (e) {}
+  }
 
   function injectFloatingBtn() {
     const s = document.createElement('style');
@@ -176,6 +234,7 @@
         if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey) return;
         e.preventDefault();
         setViewerFlag(true);
+        rememberNavigationTarget(a.getAttribute('href'));
         location.href = a.getAttribute('href');
       });
 
@@ -522,7 +581,8 @@
       #nt-dark-panel {
         position: fixed; right: 16px; bottom: 70px; z-index: 100000;
         background:var(--nt-surface, #161b22); border:1px solid var(--nt-border, #30363d); border-radius:10px;
-        padding:14px 16px; width: 250px; max-width: calc(100vw - 24px); display:none;
+        padding:14px 16px; width: 250px; max-width: calc(100vw - 24px); max-height:calc(100vh - 110px);
+        overflow-y:auto; display:none;
         color:var(--nt-title, #e6edf3); font-size:13px; box-shadow:0 8px 24px rgba(0,0,0,.5);
       }
       #nt-dark-panel.open { display:block; }
@@ -534,6 +594,16 @@
       #nt-dark-panel .presets button { flex:1; }
       #nt-dark-panel .presets button.active { background:var(--nt-primary, #1f6feb); border-color:var(--nt-primary, #1f6feb); color:#fff; font-weight:700; }
       #nt-dark-panel .btns { display:flex; gap:8px; justify-content:flex-end; margin-top:4px; }
+      #nt-dark-panel .sync { border-top:1px solid var(--nt-border, #30363d); padding-top:12px; }
+      #nt-dark-panel .sync small { display:block; color:var(--nt-muted, #8b949e); margin-bottom:6px; overflow-wrap:anywhere; }
+      #nt-dark-panel input[type=password] {
+        box-sizing:border-box; width:100%; padding:7px 8px; border-radius:6px;
+        border:1px solid var(--nt-border, #30363d); background:var(--nt-button, #21262d);
+        color:var(--nt-title, #e6edf3); margin-bottom:7px;
+      }
+      #nt-dark-panel .sync-actions { display:flex; gap:6px; }
+      #nt-dark-panel .sync-actions button { flex:1; }
+      #nt-sync-status { margin-top:6px; color:var(--nt-muted, #8b949e); }
       #nt-dark-panel button {
         padding:6px 12px; border-radius:6px; border:1px solid var(--nt-border, #30363d);
         background:var(--nt-button, #21262d); color:var(--nt-title, #e6edf3); cursor:pointer; font-size:12px;
@@ -558,6 +628,16 @@
     <div class="row">
       <label>따뜻한 색감 <span class="val" data-v="warm"></span></label>
       <input type="range" id="nt-warm" min="0" max="100" step="5">
+    </div>
+    <div class="row sync">
+      <label>읽기 위치 동기화</label>
+      <small>${SYNC_URL}</small>
+      <input type="password" id="nt-sync-token" autocomplete="off" placeholder="공통 토큰 입력">
+      <div class="sync-actions">
+        <button type="button" id="nt-sync-save">저장·확인</button>
+        <button type="button" id="nt-sync-clear">삭제</button>
+      </div>
+      <div id="nt-sync-status"></div>
     </div>
     <div class="btns"><button id="nt-reset">기본값</button><button id="nt-close">닫기</button></div>
   `;
@@ -591,6 +671,23 @@
   });
   panel.querySelector('#nt-reset').addEventListener('click', () => { cfg = Object.assign({}, DEFAULTS); saveCfg(); });
   panel.querySelector('#nt-close').addEventListener('click', () => panel.classList.remove('open'));
+  const syncTokenInput = panel.querySelector('#nt-sync-token');
+  const syncStatus = panel.querySelector('#nt-sync-status');
+  syncStatus.textContent = getSyncToken() ? '토큰 설정됨' : '토큰을 입력하면 동기화를 시작합니다.';
+  panel.querySelector('#nt-sync-save').addEventListener('click', () => {
+    const token = syncTokenInput.value.trim();
+    if (!token) { syncStatus.textContent = '토큰을 입력하세요.'; return; }
+    if (!episodeInfo) { syncStatus.textContent = '이 작품 주소는 동기화를 지원하지 않습니다.'; return; }
+    GM_setValue(SYNC_TOKEN_KEY, token);
+    syncTokenInput.value = '';
+    syncStatus.textContent = '연결 확인 중…';
+    restoreProgress();
+  });
+  panel.querySelector('#nt-sync-clear').addEventListener('click', () => {
+    GM_setValue(SYNC_TOKEN_KEY, '');
+    syncTokenInput.value = '';
+    syncStatus.textContent = '동기화 꺼짐';
+  });
   gear.addEventListener('click', e => { e.stopPropagation(); panel.classList.toggle('open'); });
   document.addEventListener('click', e => {
     if (!panel.contains(e.target) && e.target !== gear) panel.classList.remove('open');
@@ -599,17 +696,44 @@
   document.body.appendChild(nav);
 
   /* ---------- 스크롤 내리면 하단바 숨김, 올리거나 바닥에 닿으면 표시 + 읽던 위치 저장 ---------- */
-  // 스크롤 위치 저장 키 (회차 단위)
-  const scrollKey = (() => {
-    try {
-      const wm = path.match(/^\/(webtoon|novel)\/([^/]+)\//);
-      const ep = (path.split('/').pop() || '').match(/(\d+)/);
-      return wm && ep ? 'ntScroll:' + wm[1] + ':' + wm[2] + ':' + ep[1] : null;
-    } catch (e) { return null; }
-  })();
-
+  const scrollKey = episodeInfo
+    ? 'ntScroll:' + episodeInfo.kind + ':' + episodeInfo.workId + ':' + episodeInfo.episodeId
+    : null;
   let lastY = window.scrollY;
   let saveTimer = null;
+  let remoteSaveTimer = null;
+  let lastRemoteSave = 0;
+  let syncReady = false;
+  let restoreSequence = 0;
+
+  function currentRatio() {
+    const max = document.documentElement.scrollHeight - window.innerHeight;
+    return max > 0 ? Math.max(0, Math.min(1, window.scrollY / max)) : 0;
+  }
+  function saveRemoteProgress(ratio) {
+    if (!episodeInfo || !getSyncToken()) return Promise.resolve();
+    lastRemoteSave = Date.now();
+    return syncRequest('PUT', '/v1/progress', {
+      kind: episodeInfo.kind,
+      work_id: episodeInfo.workId,
+      episode_id: episodeInfo.episodeId,
+      position: ratio,
+      title: titleText,
+      device_id: getDeviceId()
+    }).then(() => { syncStatus.textContent = '동기화됨'; })
+      .catch(e => { syncStatus.textContent = '오프라인: 로컬에 저장됨'; });
+  }
+  function saveProgress(immediate) {
+    if (!scrollKey) return;
+    const ratio = currentRatio();
+    try { localStorage.setItem(scrollKey, String(ratio)); } catch (e) {}
+    if (!syncReady || !getSyncToken()) return;
+    clearTimeout(remoteSaveTimer);
+    if (immediate) { saveRemoteProgress(ratio); return; }
+    const delay = Math.max(0, 5000 - (Date.now() - lastRemoteSave));
+    remoteSaveTimer = setTimeout(() => saveRemoteProgress(ratio), delay);
+  }
+
   window.addEventListener('scroll', () => {
     const y = window.scrollY;
     const atBottom = window.innerHeight + y >= document.documentElement.scrollHeight - 120;
@@ -623,23 +747,55 @@
     }
     lastY = y;
 
-    // 읽던 위치 저장 (비율 기반 — 웹툰 이미지 로딩으로 높이 변해도 복원 가능), 500ms 디바운스
+    // 로컬은 500ms 디바운스, 서버는 최대 5초 간격으로 저장한다.
     if (scrollKey) {
       clearTimeout(saveTimer);
-      saveTimer = setTimeout(() => {
-        try {
-          const max = document.documentElement.scrollHeight - window.innerHeight;
-          if (max > 0) localStorage.setItem(scrollKey, String(y / max));
-        } catch (e) {}
-      }, 500);
+      saveTimer = setTimeout(() => saveProgress(false), 500);
     }
   }, { passive: true });
 
-  /* ---------- 읽던 위치 복원 ---------- */
-  (function restoreScroll() {
-    if (!scrollKey) return;
+  let navigating = false;
+  window.addEventListener('pagehide', () => { if (!navigating) saveProgress(true); });
+
+  /* ---------- 로컬/서버 읽던 위치 복원 ---------- */
+  async function restoreProgress() {
+    if (!scrollKey || !episodeInfo) { syncReady = true; return; }
+    const sequence = ++restoreSequence;
     let ratio = NaN;
     try { ratio = parseFloat(localStorage.getItem(scrollKey)); } catch (e) {}
+    const currentKey = episodeInfo.kind + ':' + episodeInfo.workId + ':' + episodeInfo.episodeId;
+    let intentionalNavigation = false;
+    try {
+      intentionalNavigation = sessionStorage.getItem(SYNC_NAV_TARGET_KEY) === currentKey;
+      if (intentionalNavigation) sessionStorage.removeItem(SYNC_NAV_TARGET_KEY);
+    } catch (e) {}
+    if (getSyncToken()) {
+      try {
+        const result = await syncRequest(
+          'GET',
+          '/v1/progress?kind=' + episodeInfo.kind + '&work_id=' + encodeURIComponent(episodeInfo.workId)
+        );
+        if (sequence !== restoreSequence) return;
+        syncStatus.textContent = '연결됨';
+        const remote = result.progress;
+        if (remote && remote.episode_id !== episodeInfo.episodeId && !intentionalNavigation) {
+          const label = remote.title || ('회차 ' + remote.episode_id);
+          if (confirm('다른 기기에서 읽던 위치가 있습니다.\n' + label + '\n\n이 회차로 이동할까요?')) {
+            const target = '/' + episodeInfo.kind + '/' + episodeInfo.workId + '/' + remote.episode_id;
+            rememberNavigationTarget(target);
+            setViewerFlag(true);
+            location.href = target;
+            return;
+          }
+        } else if (remote && remote.episode_id === episodeInfo.episodeId) {
+          ratio = Number(remote.position);
+        }
+      } catch (e) {
+        syncStatus.textContent = '오프라인: 로컬 위치 사용';
+      }
+    }
+    syncReady = true;
+    if (intentionalNavigation) saveRemoteProgress(isFinite(ratio) ? ratio : 0);
     if (!isFinite(ratio) || ratio <= 0) return;
     // 콘텐츠 높이 안정화를 대기하며 비율 위치로 이동 (최대 8초)
     const started = Date.now();
@@ -659,9 +815,16 @@
       }
       if (Date.now() - started > 8000) clearInterval(t);
     }, 250);
-  })();
+  }
+  restoreProgress();
 
-  function go(url) { if (url) location.href = url; }
+  function go(url) {
+    if (!url) return;
+    saveProgress(true);
+    navigating = true;
+    rememberNavigationTarget(url);
+    location.href = url;
+  }
   /* 좌우 가장자리 클릭 → 이전/다음 화 (소설·웹툰 공통, P2)
      웹툰 본문(이미지 영역) 중앙 클릭은 무시 */
   document.addEventListener('click', e => {
@@ -678,4 +841,3 @@
   /* ---------- 진입: 본문 준비 대기 후 뷰어 구성 ---------- */
   startViewerWhenReady();
 })();
-
