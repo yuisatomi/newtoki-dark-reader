@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         뉴토끼 다크 리더 (본문 전용 뷰어)
 // @namespace    nt-dark-reader
-// @version      4.7
-// @description  뉴토끼 소설/웹툰: 플로팅 버튼으로 다크 뷰어 진입. 도메인이 바뀌어도 자동 인식 + 메뉴에서 도메인 직접 추가 가능
+// @version      4.8
+// @description  뉴토끼 소설/웹툰: 야간 다크/주간 종이색 본문 뷰어. 도메인이 바뀌어도 자동 인식 + 메뉴에서 도메인 직접 추가 가능
 // @homepageURL  https://github.com/yuisatomi/newtoki-dark-reader
 // @updateURL    https://raw.githubusercontent.com/yuisatomi/newtoki-dark-reader/main/newtoki-dark-reader.user.js
 // @downloadURL  https://raw.githubusercontent.com/yuisatomi/newtoki-dark-reader/main/newtoki-dark-reader.user.js
@@ -314,7 +314,7 @@
     #nt-dark-root .nt-title {
       font-size: calc(var(--nt-font, 18px) * 1.25); font-weight: 700; color:var(--nt-title, #e6edf3);
       padding-bottom: 14px; margin-bottom: 22px;
-      border-bottom: 1px solid #21262d;
+      border-bottom: 1px solid var(--nt-border, #21262d);
     }
     #nt-dark-root .nt-body p { margin: 0 0 1.2em; }
     #nt-dark-root .nt-body, #nt-dark-root .nt-body * {
@@ -326,10 +326,10 @@
     }
     #nt-dark-root .nt-body table { width: 100% !important; table-layout: auto !important; }
     #nt-dark-root .nt-body img { max-width: 100%; height: auto; display: block; margin: 0 auto 8px; }
-    #nt-dark-root .nt-body a { color:#58a6ff; }
+    #nt-dark-root .nt-body a { color:var(--nt-accent, #58a6ff); }
     #nt-dark-root .nt-body, #nt-dark-root .nt-body * {
       background: transparent !important; color: var(--nt-text, #d7dde7) !important;
-      border-color: #21262d !important; text-shadow: none !important;
+      border-color: var(--nt-border, #21262d) !important; text-shadow: none !important;
       font-size: inherit !important; line-height: var(--nt-lh, 2.0) !important;
     }
     #nt-dark-root .nt-body h1, #nt-dark-root .nt-body h2, #nt-dark-root .nt-body h3 {
@@ -361,8 +361,8 @@
       position: fixed; left:0; right:0; bottom:0; z-index: 99999;
       display:flex; flex-wrap: wrap; gap:8px; justify-content:center; align-items:center;
       padding: 8px 12px calc(8px + env(safe-area-inset-bottom, 0px));
-      background: rgba(13,17,23,.92);
-      border-top: 1px solid #21262d; backdrop-filter: blur(6px);
+      background: var(--nt-nav-bg, rgba(13,17,23,.92));
+      border-top: 1px solid var(--nt-border, #21262d); backdrop-filter: blur(6px);
       transition: transform .25s ease;
     }
     /* 스크롤 내릴 때 숨김 */
@@ -370,7 +370,7 @@
     #nt-dark-nav a, #nt-dark-nav button {
       min-width: 0; flex: 1 1 auto; max-width: 150px;
       padding: 9px 14px; border-radius: 8px;
-      border: 1px solid #30363d; background:#161b22; color:#e6edf3;
+      border: 1px solid var(--nt-border, #30363d); background:var(--nt-surface, #161b22); color:var(--nt-title, #e6edf3);
       font-size: 15px; cursor: pointer; text-align:center; text-decoration:none;
       white-space: nowrap;
     }
@@ -383,17 +383,17 @@
       }
       #nt-dark-nav .nt-label { display:none; }   /* 라벨 숨기고 아이콘만 */
     }
-    #nt-dark-nav a.primary { background:#1f6feb; border-color:#1f6feb; color:#fff; font-weight:700; }
-    #nt-dark-nav a.origin { border-color:#238636; color:#3fb950; }
+    #nt-dark-nav a.primary { background:var(--nt-primary, #1f6feb); border-color:var(--nt-primary, #1f6feb); color:#fff; font-weight:700; }
+    #nt-dark-nav a.origin { border-color:var(--nt-accent, #238636); color:var(--nt-accent, #3fb950); }
     #nt-dark-nav a:disabled, #nt-dark-nav button:disabled { opacity:.35; cursor:default; }
-    #nt-dark-nav .nt-pos { color:#8b949e; font-size:13px; margin:0 6px; }
-    #nt-dark-root .nt-hint { color:#6e7681; font-size:12px; text-align:center; margin-top:40px; }
+    #nt-dark-nav .nt-pos { color:var(--nt-muted, #8b949e); font-size:13px; margin:0 6px; }
+    #nt-dark-root .nt-hint { color:var(--nt-muted, #6e7681); font-size:12px; text-align:center; margin-top:40px; }
   `;
   root.appendChild(style);
 
   if (!isNovelEp) root.classList.add('nt-webtoon');
 
-  const DEFAULTS = { font: 18, width: 720, lh: 2.0, warm: 45 };
+  const DEFAULTS = { font: 18, width: 720, lh: 2.0, warm: 45, theme: 'dark' };
   let cfg = Object.assign({}, DEFAULTS);
   try {
     const saved = localStorage.getItem('ntDarkReaderCfg');
@@ -401,9 +401,20 @@
   } catch (e) {}
   function applyCfg() {
     cfg.warm = Math.max(0, Math.min(100, Number(cfg.warm) || 0));
-    const bg = `color-mix(in srgb, #0d1117, #1b1208 ${cfg.warm}%)`;
-    const text = `color-mix(in srgb, #d7dde7, #d8b98a ${cfg.warm}%)`;
-    const title = `color-mix(in srgb, #e6edf3, #ead0a8 ${cfg.warm}%)`;
+    cfg.theme = cfg.theme === 'paper' ? 'paper' : 'dark';
+    const paper = cfg.theme === 'paper';
+    const bg = paper
+      ? `color-mix(in srgb, #f7f1e5, #ead09e ${cfg.warm}%)`
+      : `color-mix(in srgb, #0d1117, #1b1208 ${cfg.warm}%)`;
+    const text = paper
+      ? `color-mix(in srgb, #28231e, #49351f ${cfg.warm}%)`
+      : `color-mix(in srgb, #d7dde7, #d8b98a ${cfg.warm}%)`;
+    const title = paper
+      ? `color-mix(in srgb, #1f1b17, #3f2b17 ${cfg.warm}%)`
+      : `color-mix(in srgb, #e6edf3, #ead0a8 ${cfg.warm}%)`;
+    const ui = paper
+      ? { surface: '#e8dcc6', border: '#cbb996', muted: '#756855', accent: '#76512c', primary: '#8a5a2b', nav: 'rgba(242,232,213,.94)' }
+      : { surface: '#161b22', border: '#30363d', muted: '#8b949e', accent: '#58a6ff', primary: '#1f6feb', nav: 'rgba(13,17,23,.92)' };
     root.style.setProperty('--nt-font', cfg.font + 'px');
     root.style.setProperty('--nt-width', cfg.width + 'px');
     root.style.setProperty('--nt-lh', cfg.lh);
@@ -411,6 +422,10 @@
     root.style.setProperty('--nt-text', text);
     root.style.setProperty('--nt-title', title);
     document.documentElement.style.setProperty('--nt-bg', bg);
+    Object.entries(ui).forEach(([name, value]) => {
+      root.style.setProperty('--nt-' + (name === 'nav' ? 'nav-bg' : name), value);
+      document.documentElement.style.setProperty('--nt-' + (name === 'nav' ? 'nav-bg' : name), value);
+    });
     bodyEl.style.setProperty('--theme-novel-text-color', text);
   }
   applyCfg();
@@ -486,21 +501,28 @@
     <style>
       #nt-dark-panel {
         position: fixed; right: 16px; bottom: 70px; z-index: 100000;
-        background:#161b22; border:1px solid #30363d; border-radius:10px;
+        background:var(--nt-surface, #161b22); border:1px solid var(--nt-border, #30363d); border-radius:10px;
         padding:14px 16px; width: 250px; max-width: calc(100vw - 24px); display:none;
-        color:#e6edf3; font-size:13px; box-shadow:0 8px 24px rgba(0,0,0,.5);
+        color:var(--nt-title, #e6edf3); font-size:13px; box-shadow:0 8px 24px rgba(0,0,0,.5);
       }
       #nt-dark-panel.open { display:block; }
       #nt-dark-panel .row { margin-bottom:12px; }
-      #nt-dark-panel label { display:flex; justify-content:space-between; margin-bottom:4px; color:#8b949e; }
+      #nt-dark-panel label { display:flex; justify-content:space-between; margin-bottom:4px; color:var(--nt-muted, #8b949e); }
       #nt-dark-panel input[type=range] { width:100%; }
-      #nt-dark-panel .val { color:#58a6ff; font-weight:700; }
+      #nt-dark-panel .val { color:var(--nt-accent, #58a6ff); font-weight:700; }
+      #nt-dark-panel .presets { display:flex; gap:8px; margin-bottom:14px; }
+      #nt-dark-panel .presets button { flex:1; }
+      #nt-dark-panel .presets button.active { background:var(--nt-primary, #1f6feb); border-color:var(--nt-primary, #1f6feb); color:#fff; font-weight:700; }
       #nt-dark-panel .btns { display:flex; gap:8px; justify-content:flex-end; margin-top:4px; }
       #nt-dark-panel button {
-        padding:6px 12px; border-radius:6px; border:1px solid #30363d;
-        background:#21262d; color:#e6edf3; cursor:pointer; font-size:12px;
+        padding:6px 12px; border-radius:6px; border:1px solid var(--nt-border, #30363d);
+        background:var(--nt-surface, #21262d); color:var(--nt-title, #e6edf3); cursor:pointer; font-size:12px;
       }
     </style>
+    <div class="presets">
+      <button type="button" data-theme="dark">🌙 야간 다크</button>
+      <button type="button" data-theme="paper">☀ 주간 종이색</button>
+    </div>
     <div class="row">
       <label>글자 크기 <span class="val" data-v="font"></span></label>
       <input type="range" id="nt-f" min="12" max="32" step="1">
@@ -530,6 +552,9 @@
     panel.querySelector('[data-v=width]').textContent = cfg.width + 'px';
     panel.querySelector('[data-v=lh]').textContent = cfg.lh.toFixed(1);
     panel.querySelector('[data-v=warm]').textContent = cfg.warm + '%';
+    panel.querySelectorAll('[data-theme]').forEach(button => {
+      button.classList.toggle('active', button.dataset.theme === cfg.theme);
+    });
   }
   syncPanel();
 
@@ -541,6 +566,9 @@
   panel.querySelector('#nt-w').addEventListener('input', e => { cfg.width = +e.target.value; saveCfg(); });
   panel.querySelector('#nt-lh').addEventListener('input', e => { cfg.lh = +e.target.value; saveCfg(); });
   panel.querySelector('#nt-warm').addEventListener('input', e => { cfg.warm = +e.target.value; saveCfg(); });
+  panel.querySelectorAll('[data-theme]').forEach(button => {
+    button.addEventListener('click', () => { cfg.theme = button.dataset.theme; saveCfg(); });
+  });
   panel.querySelector('#nt-reset').addEventListener('click', () => { cfg = Object.assign({}, DEFAULTS); saveCfg(); });
   panel.querySelector('#nt-close').addEventListener('click', () => panel.classList.remove('open'));
   gear.addEventListener('click', e => { e.stopPropagation(); panel.classList.toggle('open'); });
