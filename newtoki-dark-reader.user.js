@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         뉴토끼 다크 리더 (본문 전용 뷰어)
 // @namespace    nt-dark-reader
-// @version      5.3
+// @version      5.4
 // @description  뉴토끼 소설/웹툰: 야간 다크/주간 종이색 본문 뷰어와 기기 간 읽기 위치 동기화
 // @homepageURL  https://github.com/yuisatomi/newtoki-dark-reader
 // @updateURL    https://raw.githubusercontent.com/yuisatomi/newtoki-dark-reader/main/newtoki-dark-reader.user.js
@@ -357,6 +357,7 @@
 
   /* ---------- 실제 뷰어 구성 (본문 준비 완료 후 호출) ---------- */
   function buildViewer() {
+  const episodeText = document.querySelector('.page-desc')?.textContent || titleText;
   document.head.querySelectorAll('link[rel="stylesheet"], style').forEach(el => el.remove());
 
   const root = document.createElement('div');
@@ -562,7 +563,7 @@
   });
   nav.appendChild(exit);
 
-  const m = titleText.match(/(\d+)화/);
+  const m = episodeText.match(/(\d+)\s*화/);
   if (m) {
     const pos = document.createElement('span');
     pos.className = 'nt-pos';

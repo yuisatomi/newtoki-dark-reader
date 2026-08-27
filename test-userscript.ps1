@@ -34,6 +34,8 @@ if (-not $source.Contains("GM_getValue(SYNC_TOKEN_KEY, '')") -or -not $source.Co
 if (-not $source.Contains("syncRequest('PUT', '/v1/progress'") -or -not $source.Contains("'/v1/progress?kind='")) { throw 'Progress sync API calls are missing.' }
 if (-not $source.Contains("window.addEventListener('pagehide'")) { throw 'Final progress save is missing.' }
 if (-not $source.Contains('remote.episode_id === episodeInfo.episodeId')) { throw 'Remote episode position is not restored.' }
+if (-not $source.Contains("document.querySelector('.page-desc')?.textContent || titleText")) { throw 'Original episode metadata is not captured.' }
+if (-not $source.Contains('episodeText.match(/(\d+)\s*화/)')) { throw 'Episode number is still restricted to the viewer title.' }
 $buildCall = $source.IndexOf('    buildViewer();')
 $readWrite = $source.IndexOf("localStorage.setItem('ntRead:")
 if ($buildCall -lt 0 -or $readWrite -lt $buildCall) { throw 'Episode is marked read before the viewer succeeds.' }
