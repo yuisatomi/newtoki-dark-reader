@@ -1,0 +1,25 @@
+[Unit]
+Description=Reading progress sync API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=reader-sync
+Group=reader-sync
+EnvironmentFile=/etc/reader-sync.env
+ExecStart=/usr/bin/python3 /opt/reader-sync/reader_sync.py
+Restart=on-failure
+RestartSec=2
+StateDirectory=reader-sync
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target
