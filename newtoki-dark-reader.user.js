@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         뉴토끼 다크 리더 (본문 전용 뷰어)
 // @namespace    nt-dark-reader
-// @version      5.7
+// @version      5.8
 // @description  뉴토끼 소설/웹툰: 야간 다크/주간 종이색 본문 뷰어와 기기 간 읽기 위치 동기화
 // @homepageURL  https://github.com/yuisatomi/newtoki-dark-reader
 // @updateURL    https://raw.githubusercontent.com/yuisatomi/newtoki-dark-reader/main/newtoki-dark-reader.user.js
@@ -190,14 +190,16 @@
   function rememberReadWork(workTitle, episodeNumber) {
     if (!episodeInfo) return;
     const key = episodeInfo.kind + ':' + episodeInfo.workId;
-    const records = getReadLibrary().filter(record => record.key !== key);
+    const library = getReadLibrary();
+    const previous = library.find(record => record.key === key);
+    const records = library.filter(record => record.key !== key);
     records.unshift({
       key,
       kind: episodeInfo.kind,
       workId: episodeInfo.workId,
       episodeId: episodeInfo.episodeId,
-      episodeNumber: episodeNumber || '',
-      workTitle: workTitle || (episodeInfo.kind === 'novel' ? '소설 ' : '웹툰 ') + episodeInfo.workId,
+      episodeNumber: episodeNumber || previous?.episodeNumber || '',
+      workTitle: workTitle || previous?.workTitle || (episodeInfo.kind === 'novel' ? '소설 ' : '웹툰 ') + episodeInfo.workId,
       updatedAt: Date.now()
     });
     saveReadLibrary(records);
@@ -231,6 +233,31 @@
     if (changed) saveReadLibrary(records);
     return records.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
   }
+  async function refreshReadMetadata(record, title, episode) {
+    try {
+      episode.textContent = '작품 정보 확인 중…';
+      const response = await fetch('/' + record.kind + '/' + record.workId + '/' + record.episodeId, { credentials: 'same-origin' });
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      const doc = new DOMParser().parseFromString(await response.text(), 'text/html');
+      const workPath = '/' + record.kind + '/' + record.workId;
+      const workTitle = [...doc.querySelectorAll('a[href]')]
+        .filter(a => new URL(a.getAttribute('href'), location.origin).pathname.replace(/\/$/, '') === workPath)
+        .map(a => a.textContent.trim()).filter(text => text && text !== '목록').sort((a, b) => b.length - a.length)[0];
+      const description = doc.querySelector('meta[name="description"]')?.content || doc.querySelector('.page-desc')?.textContent || '';
+      const episodeNumber = description.match(/(\d+)\s*화/)?.[1] || '';
+      if (!workTitle && !episodeNumber) throw new Error('메타데이터 없음');
+      const records = getReadLibrary();
+      const saved = records.find(item => item.key === record.key);
+      if (!saved) return;
+      if (workTitle) saved.workTitle = workTitle;
+      if (episodeNumber) saved.episodeNumber = episodeNumber;
+      saveReadLibrary(records);
+      title.textContent = saved.workTitle || saved.workId;
+      episode.textContent = saved.episodeNumber ? saved.episodeNumber + '화까지 읽음' : '저장된 회차로 이동';
+    } catch (e) {
+      episode.textContent = '작품 정보를 불러오지 못했습니다.';
+    }
+  }
   function openReadLibrary() {
     document.getElementById('nt-library-dialog')?.remove();
     const dialog = document.createElement('dialog');
@@ -259,6 +286,7 @@
       empty.textContent = '저장된 작품이 없습니다.';
       list.appendChild(empty);
     }
+    let metadataQueue = Promise.resolve();
     records.forEach(record => {
       const row = document.createElement('div');
       row.className = 'nt-lib-item';
@@ -294,6 +322,10 @@
       });
       row.append(info, open, remove);
       list.appendChild(row);
+      const fallbackTitle = (record.kind === 'novel' ? '소설 ' : '웹툰 ') + record.workId;
+      if (!record.episodeNumber || !record.workTitle || record.workTitle === fallbackTitle) {
+        metadataQueue = metadataQueue.then(() => refreshReadMetadata(record, title, episode));
+      }
     });
     dialog.querySelector('header button').addEventListener('click', () => dialog.close());
     dialog.addEventListener('close', () => dialog.remove(), { once: true });
