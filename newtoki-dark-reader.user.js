@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         뉴토끼 다크 리더 (본문 전용 뷰어)
 // @namespace    nt-dark-reader
-// @version      5.10
+// @version      5.11
 // @description  뉴토끼 소설/웹툰: 야간 다크/주간 종이색 본문 뷰어와 기기 간 읽기 위치 동기화
 // @homepageURL  https://github.com/yuisatomi/newtoki-dark-reader
 // @updateURL    https://raw.githubusercontent.com/yuisatomi/newtoki-dark-reader/main/newtoki-dark-reader.user.js
@@ -260,8 +260,32 @@
   }
   async function mergeRemoteReadLibrary() {
     if (!getSyncToken()) return;
-    const result = await syncRequest('GET', '/v1/progress');
+    let result = await syncRequest('GET', '/v1/progress');
     if (!Array.isArray(result.progress)) return;
+    const remoteByKey = new Map(result.progress.map(remote => [remote.kind + ':' + remote.work_id, remote]));
+    const uploads = getReadLibrary().filter(record => {
+      if (!['novel', 'webtoon'].includes(record?.kind) || !record.workId || !record.episodeId) return false;
+      const remote = remoteByKey.get(record.key);
+      return !remote || (record.updatedAt || 0) > (remote.updated_at || 0);
+    }).map(record => {
+      let position = 0;
+      try {
+        position = Number(localStorage.getItem('ntScroll:' + record.kind + ':' + record.workId + ':' + record.episodeId));
+        if (!isFinite(position) || position < 0 || position > 1) position = 0;
+      } catch (e) {}
+      return {
+        kind: record.kind,
+        work_id: record.workId,
+        episode_id: record.episodeId,
+        position,
+        title: record.workTitle || '',
+        device_id: getDeviceId()
+      };
+    });
+    for (let i = 0; i < uploads.length; i += 4) {
+      await Promise.all(uploads.slice(i, i + 4).map(data => syncRequest('PUT', '/v1/progress', data)));
+    }
+    if (uploads.length) result = await syncRequest('GET', '/v1/progress');
     const records = getReadLibrary();
     const byKey = new Map(records.map(record => [record.key, record]));
     result.progress.forEach(remote => {
@@ -272,6 +296,7 @@
       if (saved) {
         saved.episodeId = remote.episode_id;
         saved.episodeNumber = '';
+        if (remote.title) saved.workTitle = remote.title;
         saved.updatedAt = remote.updated_at || 0;
       } else {
         const record = {
@@ -280,7 +305,7 @@
           workId: remote.work_id,
           episodeId: remote.episode_id,
           episodeNumber: '',
-          workTitle: (remote.kind === 'novel' ? '소설 ' : '웹툰 ') + remote.work_id,
+          workTitle: remote.title || (remote.kind === 'novel' ? '소설 ' : '웹툰 ') + remote.work_id,
           updatedAt: remote.updated_at || 0
         };
         records.push(record);
@@ -288,6 +313,13 @@
       }
     });
     saveReadLibrary(records);
+  }
+  let readLibrarySyncPromise = null;
+  function syncReadLibrary() {
+    if (!readLibrarySyncPromise) {
+      readLibrarySyncPromise = mergeRemoteReadLibrary().finally(() => { readLibrarySyncPromise = null; });
+    }
+    return readLibrarySyncPromise;
   }
   async function openReadLibrary() {
     document.getElementById('nt-library-dialog')?.remove();
@@ -319,9 +351,18 @@
       const loading = document.createElement('div');
       loading.className = 'nt-lib-empty'; loading.textContent = '다른 기기의 저장 목록 동기화 중…';
       list.appendChild(loading);
-      try { await mergeRemoteReadLibrary(); records = migrateLegacyReads(); } catch (e) {}
+      try {
+        await syncReadLibrary();
+        records = migrateLegacyReads();
+      } catch (e) {
+        const error = document.createElement('div');
+        error.className = 'nt-lib-empty';
+        error.style.color = '#fca5a5';
+        error.textContent = '동기화 실패: ' + e.message;
+        list.appendChild(error);
+      }
       if (!dialog.isConnected) return;
-      list.innerHTML = '';
+      loading.remove();
     }
     if (!records.length) {
       const empty = document.createElement('div');
@@ -390,6 +431,7 @@
   }
 
   injectLibraryButton(isEpisodePage);
+  if (getSyncToken()) syncReadLibrary().catch(() => {});
 
   /* ---------- 뷰어 전용 목록 페이지 (?ntlist=1) ---------- */
   const isListPage = /^\/(webtoon|novel)\/[^/]+\/?$/.test(path) && /[?&]ntlist=1/.test(location.search);
@@ -996,7 +1038,10 @@
       title: titleText,
       device_id: getDeviceId()
     }).then(() => { syncStatus.textContent = '동기화됨'; })
-      .catch(e => { syncStatus.textContent = '오프라인: 로컬에 저장됨'; });
+      .catch(e => {
+        syncStatus.textContent = '동기화 실패: ' + e.message;
+        throw e;
+      });
   }
   function saveProgress(immediate) {
     if (!scrollKey) return;
@@ -1004,9 +1049,9 @@
     try { localStorage.setItem(scrollKey, String(ratio)); } catch (e) {}
     if (!syncReady || !getSyncToken()) return;
     clearTimeout(remoteSaveTimer);
-    if (immediate) { saveRemoteProgress(ratio); return; }
+    if (immediate) { saveRemoteProgress(ratio).catch(() => {}); return; }
     const delay = Math.max(0, 5000 - (Date.now() - lastRemoteSave));
-    remoteSaveTimer = setTimeout(() => saveRemoteProgress(ratio), delay);
+    remoteSaveTimer = setTimeout(() => saveRemoteProgress(ratio).catch(() => {}), delay);
   }
 
   manualSaveButton.addEventListener('click', () => {
@@ -1018,9 +1063,13 @@
     rememberReadWork(workTitle, m ? m[1] : '');
     manualSaveButton.disabled = true;
     manualSaveButton.innerHTML = '<span class="nt-ico">⏳</span><span class="nt-label"> 저장 중</span>';
-    const pending = getSyncToken() ? saveRemoteProgress(ratio) : Promise.resolve();
-    pending.finally(() => {
-      manualSaveButton.innerHTML = '<span class="nt-ico">✓</span><span class="nt-label"> 저장됨</span>';
+    const remoteEnabled = !!getSyncToken();
+    const pending = remoteEnabled ? saveRemoteProgress(ratio) : Promise.resolve();
+    pending.then(() => {
+      manualSaveButton.innerHTML = '<span class="nt-ico">✓</span><span class="nt-label"> ' + (remoteEnabled ? '동기화됨' : '로컬 저장됨') + '</span>';
+    }).catch(() => {
+      manualSaveButton.innerHTML = '<span class="nt-ico">⚠</span><span class="nt-label"> 동기화 실패</span>';
+    }).finally(() => {
       setTimeout(() => {
         manualSaveButton.disabled = false;
         manualSaveButton.innerHTML = '<span class="nt-ico">💾</span><span class="nt-label"> 저장</span>';
@@ -1089,7 +1138,7 @@
       }
     }
     syncReady = true;
-    if (intentionalNavigation) saveRemoteProgress(isFinite(ratio) ? ratio : 0);
+    if (intentionalNavigation) saveRemoteProgress(isFinite(ratio) ? ratio : 0).catch(() => {});
     if (!isFinite(ratio) || ratio <= 0) return;
     // 콘텐츠 높이 안정화를 대기하며 비율 위치로 이동 (최대 8초)
     const started = Date.now();
