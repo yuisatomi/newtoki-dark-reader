@@ -41,6 +41,11 @@ if (-not $source.Contains("url.searchParams.set('ntlist', '1')")) { throw 'Episo
 if (-not $source.Contains(':not(.wr-subject):not(.wr-num)')) { throw 'Episode numbers are hidden in list mode.' }
 if (-not $source.Contains("url.searchParams.set('ntep', episodeInfo.episodeId)")) { throw 'Current episode is not passed to list mode.' }
 if (-not $source.Contains("targetItem.scrollIntoView({ block: 'center' })")) { throw 'Current episode is not centered in list mode.' }
+if (-not $source.Contains("const READ_LIBRARY_KEY = 'ntReaderLibrary'")) { throw 'Read library storage is missing.' }
+if (-not $source.Contains('injectLibraryButton(isEpisodePage)')) { throw 'Site-wide read library access is missing.' }
+if (-not $source.Contains("library.addEventListener('click', openReadLibrary)")) { throw 'Viewer navigation cannot open the read library.' }
+if (-not $source.Contains('saveReadLibrary(getReadLibrary().filter')) { throw 'Read library entries cannot be deleted.' }
+if (-not $source.Contains("open.textContent = '이어보기'")) { throw 'Read library entries cannot be resumed.' }
 $buildCall = $source.IndexOf('    buildViewer();')
 $readWrite = $source.IndexOf("localStorage.setItem('ntRead:")
 if ($buildCall -lt 0 -or $readWrite -lt $buildCall) { throw 'Episode is marked read before the viewer succeeds.' }

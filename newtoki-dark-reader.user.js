@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         뉴토끼 다크 리더 (본문 전용 뷰어)
 // @namespace    nt-dark-reader
-// @version      5.6
+// @version      5.7
 // @description  뉴토끼 소설/웹툰: 야간 다크/주간 종이색 본문 뷰어와 기기 간 읽기 위치 동기화
 // @homepageURL  https://github.com/yuisatomi/newtoki-dark-reader
 // @updateURL    https://raw.githubusercontent.com/yuisatomi/newtoki-dark-reader/main/newtoki-dark-reader.user.js
@@ -28,6 +28,7 @@
   const SYNC_URL = 'https://reader-sync.flolim.com';
   const SYNC_TOKEN_KEY = 'ntReaderSyncToken';
   const DEVICE_ID_KEY = 'ntReaderDeviceId';
+  const READ_LIBRARY_KEY = 'ntReaderLibrary';
 
   function getSyncToken() {
     try { return String(GM_getValue(SYNC_TOKEN_KEY, '') || '').trim(); } catch (e) { return ''; }
@@ -177,6 +178,142 @@
     } catch (e) {}
   }
 
+  function getReadLibrary() {
+    try {
+      const records = GM_getValue(READ_LIBRARY_KEY, []);
+      return Array.isArray(records) ? records : [];
+    } catch (e) { return []; }
+  }
+  function saveReadLibrary(records) {
+    try { GM_setValue(READ_LIBRARY_KEY, records); } catch (e) {}
+  }
+  function rememberReadWork(workTitle, episodeNumber) {
+    if (!episodeInfo) return;
+    const key = episodeInfo.kind + ':' + episodeInfo.workId;
+    const records = getReadLibrary().filter(record => record.key !== key);
+    records.unshift({
+      key,
+      kind: episodeInfo.kind,
+      workId: episodeInfo.workId,
+      episodeId: episodeInfo.episodeId,
+      episodeNumber: episodeNumber || '',
+      workTitle: workTitle || (episodeInfo.kind === 'novel' ? '소설 ' : '웹툰 ') + episodeInfo.workId,
+      updatedAt: Date.now()
+    });
+    saveReadLibrary(records);
+  }
+  function migrateLegacyReads() {
+    const records = getReadLibrary();
+    const known = new Set(records.map(record => record.key));
+    let changed = false;
+    try {
+      for (let i = 0; i < localStorage.length; i++) {
+        const storageKey = localStorage.key(i) || '';
+        const match = storageKey.match(/^ntRead:(webtoon|novel):(.+)$/);
+        if (!match) continue;
+        const episodeId = localStorage.getItem(storageKey);
+        if (!episodeId) continue;
+        const key = match[1] + ':' + match[2];
+        if (known.has(key)) continue;
+        records.push({
+          key,
+          kind: match[1],
+          workId: match[2],
+          episodeId,
+          episodeNumber: '',
+          workTitle: (match[1] === 'novel' ? '소설 ' : '웹툰 ') + match[2],
+          updatedAt: 0
+        });
+        known.add(key);
+        changed = true;
+      }
+    } catch (e) {}
+    if (changed) saveReadLibrary(records);
+    return records.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  }
+  function openReadLibrary() {
+    document.getElementById('nt-library-dialog')?.remove();
+    const dialog = document.createElement('dialog');
+    dialog.id = 'nt-library-dialog';
+    dialog.innerHTML = `<style>
+      #nt-library-dialog { width:min(560px,calc(100vw - 32px)); max-height:80vh; padding:0; border:1px solid #30363d;
+        border-radius:12px; background:#161b22; color:#e6edf3; box-shadow:0 18px 60px rgba(0,0,0,.65); }
+      #nt-library-dialog::backdrop { background:rgba(0,0,0,.68); }
+      #nt-library-dialog header { display:flex; justify-content:space-between; align-items:center; padding:16px 18px; border-bottom:1px solid #30363d; }
+      #nt-library-dialog h2 { margin:0; font-size:19px; }
+      #nt-library-dialog .nt-lib-list { padding:8px 18px 18px; overflow:auto; max-height:calc(80vh - 68px); }
+      #nt-library-dialog .nt-lib-item { display:flex; gap:10px; align-items:center; padding:12px 0; border-bottom:1px solid #21262d; }
+      #nt-library-dialog .nt-lib-info { min-width:0; flex:1; }
+      #nt-library-dialog .nt-lib-title { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:700; }
+      #nt-library-dialog .nt-lib-episode { margin-top:4px; color:#8b949e; font-size:13px; }
+      #nt-library-dialog button { padding:8px 10px; border:1px solid #30363d; border-radius:7px; background:#21262d; color:#e6edf3; cursor:pointer; }
+      #nt-library-dialog .nt-lib-open { background:#1f6feb; border-color:#1f6feb; color:#fff; }
+      #nt-library-dialog .nt-lib-delete { color:#fca5a5; }
+      #nt-library-dialog .nt-lib-empty { padding:28px 0; color:#8b949e; text-align:center; }
+    </style><header><h2>📚 읽던 작품</h2><button type="button" aria-label="닫기">✕</button></header><div class="nt-lib-list"></div>`;
+    const list = dialog.querySelector('.nt-lib-list');
+    const records = migrateLegacyReads();
+    if (!records.length) {
+      const empty = document.createElement('div');
+      empty.className = 'nt-lib-empty';
+      empty.textContent = '저장된 작품이 없습니다.';
+      list.appendChild(empty);
+    }
+    records.forEach(record => {
+      const row = document.createElement('div');
+      row.className = 'nt-lib-item';
+      const info = document.createElement('div');
+      info.className = 'nt-lib-info';
+      const title = document.createElement('div');
+      title.className = 'nt-lib-title';
+      title.textContent = record.workTitle || record.workId;
+      const episode = document.createElement('div');
+      episode.className = 'nt-lib-episode';
+      episode.textContent = record.episodeNumber ? record.episodeNumber + '화까지 읽음' : '저장된 회차로 이동';
+      info.append(title, episode);
+      const open = document.createElement('button');
+      open.type = 'button'; open.className = 'nt-lib-open'; open.textContent = '이어보기';
+      open.addEventListener('click', () => {
+        const target = '/' + record.kind + '/' + record.workId + '/' + record.episodeId;
+        setViewerFlag(true);
+        rememberNavigationTarget(target);
+        location.href = target;
+      });
+      const remove = document.createElement('button');
+      remove.type = 'button'; remove.className = 'nt-lib-delete'; remove.textContent = '삭제';
+      remove.addEventListener('click', () => {
+        if (!confirm('이 작품의 저장 기록을 삭제할까요?')) return;
+        saveReadLibrary(getReadLibrary().filter(item => item.key !== record.key));
+        try { localStorage.removeItem('ntRead:' + record.kind + ':' + record.workId); } catch (e) {}
+        row.remove();
+        if (!list.querySelector('.nt-lib-item')) {
+          const empty = document.createElement('div');
+          empty.className = 'nt-lib-empty'; empty.textContent = '저장된 작품이 없습니다.';
+          list.appendChild(empty);
+        }
+      });
+      row.append(info, open, remove);
+      list.appendChild(row);
+    });
+    dialog.querySelector('header button').addEventListener('click', () => dialog.close());
+    dialog.addEventListener('close', () => dialog.remove(), { once: true });
+    document.body.appendChild(dialog);
+    dialog.showModal();
+  }
+  function injectLibraryButton(raised) {
+    if (document.getElementById('nt-library-btn')) return;
+    const button = document.createElement('button');
+    button.id = 'nt-library-btn';
+    button.textContent = '📚 읽던 작품';
+    button.style.cssText = 'position:fixed;right:18px;bottom:' + (raised ? '76px' : '18px') + ';z-index:2147482999;'
+      + 'padding:11px 15px;border:1px solid #30363d;border-radius:999px;background:#21262d;color:#fff;'
+      + 'font-size:14px;font-weight:700;cursor:pointer;box-shadow:0 6px 18px rgba(0,0,0,.45);';
+    button.addEventListener('click', openReadLibrary);
+    document.body.appendChild(button);
+  }
+
+  injectLibraryButton(isEpisodePage);
+
   /* ---------- 뷰어 전용 목록 페이지 (?ntlist=1) ---------- */
   const isListPage = /^\/(webtoon|novel)\/[^/]+\/?$/.test(path) && /[?&]ntlist=1/.test(location.search);
   if (isListPage && !/[?&]ntview=1/.test(location.search)) {
@@ -247,6 +384,7 @@
       }
       document.body.innerHTML = '';
       document.body.appendChild(root);
+      injectLibraryButton(true);
       if (targetItem) {
         targetItem.classList.add('nt-current');
         requestAnimationFrame(() => targetItem.scrollIntoView({ block: 'center' }));
@@ -397,6 +535,12 @@
   /* ---------- 실제 뷰어 구성 (본문 준비 완료 후 호출) ---------- */
   function buildViewer() {
   const episodeText = document.querySelector('.page-desc')?.textContent || titleText;
+  const workPath = episodeInfo ? '/' + episodeInfo.kind + '/' + episodeInfo.workId : '';
+  const workTitle = [...document.querySelectorAll('a[href]')]
+    .filter(a => a.pathname.replace(/\/$/, '') === workPath)
+    .map(a => a.textContent.trim()).filter(text => text && text !== '목록').sort((a, b) => b.length - a.length)[0]
+    || document.querySelector('.page-header h1, .page-header h2')?.childNodes[0]?.textContent.trim()
+    || titleText;
   document.head.querySelectorAll('link[rel="stylesheet"], style').forEach(el => el.remove());
 
   const root = document.createElement('div');
@@ -589,6 +733,7 @@
     }
   }
   const m = episodeText.match(/(\d+)\s*화/);
+  rememberReadWork(workTitle, m ? m[1] : '');
   navBtn(prevUrl, '이전화', '◀', '');
   navBtn(nextUrl, '다음화', '▶', 'primary');
   if (listUrl) {
@@ -598,6 +743,10 @@
     if (m) url.searchParams.set('ntno', m[1]);
     navBtn(url.href, '목록', '☰', '');
   }
+  const library = document.createElement('button');
+  library.innerHTML = '<span class="nt-ico">📚</span><span class="nt-label"> 읽던 작품</span>';
+  library.addEventListener('click', openReadLibrary);
+  nav.appendChild(library);
 
   const exit = document.createElement('a');
   exit.href = '#'; exit.className = 'origin';
