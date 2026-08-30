@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         뉴토끼 다크 리더 (본문 전용 뷰어)
 // @namespace    nt-dark-reader
-// @version      5.4
+// @version      5.6
 // @description  뉴토끼 소설/웹툰: 야간 다크/주간 종이색 본문 뷰어와 기기 간 읽기 위치 동기화
 // @homepageURL  https://github.com/yuisatomi/newtoki-dark-reader
 // @updateURL    https://raw.githubusercontent.com/yuisatomi/newtoki-dark-reader/main/newtoki-dark-reader.user.js
@@ -182,8 +182,26 @@
   if (isListPage && !/[?&]ntview=1/.test(location.search)) {
     // 회차 목록 ul.list-body 만 추려서 다크 화면으로 재구성
     const listBody = document.querySelector('ul.list-body');
+    const episodePager = document.querySelector('.theme-episode-pager');
     const workTitle = document.querySelector('.theme-detail-title-line');
     if (listBody) {
+      const params = new URLSearchParams(location.search);
+      const targetEpisode = params.get('ntep');
+      const targetNumber = Number(params.get('ntno'));
+      const targetItem = targetEpisode ? [...listBody.querySelectorAll('a.item-subject')].find(a =>
+        new URL(a.getAttribute('href'), location.href).pathname.split('/').filter(Boolean).pop() === targetEpisode
+      )?.closest('li.list-item') : null;
+      if (!targetItem && targetNumber > 0 && !params.has('epage')) {
+        const numbers = [...listBody.querySelectorAll('.wr-num')].map(el => Number(el.textContent.trim())).filter(Number.isFinite);
+        const pageSize = listBody.querySelectorAll('li.list-item').length;
+        const targetPage = pageSize && numbers.length ? Math.floor((Math.max(...numbers) - targetNumber) / pageSize) + 1 : 1;
+        if (targetPage > 1) {
+          const url = new URL(location.href);
+          url.searchParams.set('epage', String(targetPage));
+          location.replace(url.href);
+          return;
+        }
+      }
       document.head.querySelectorAll('link[rel="stylesheet"], style').forEach(el => el.remove());
       const root = document.createElement('div');
       root.id = 'nt-dark-root';
@@ -197,11 +215,20 @@
           #nt-dark-root ul.list-body { list-style:none!important; margin:0!important; padding:0!important; }
           #nt-dark-root li.list-item { display:flex!important; gap:10px; align-items:baseline;
             padding:11px 6px!important; border-bottom:1px solid #161b22!important; background:transparent!important; }
-          #nt-dark-root li.list-item > div:not(.wr-subject) { display:none!important; }
+          #nt-dark-root li.list-item > div:not(.wr-subject):not(.wr-num) { display:none!important; }
           #nt-dark-root .wr-num { color:#8b949e!important; font-size:13px!important; min-width:34px; }
+          #nt-dark-root li.nt-current { border-color:#238636!important; background:#161b22!important; }
           #nt-dark-root a.item-subject { color:#d7dde7!important; font-size:16px!important; text-decoration:none!important;
             line-height:1.5!important; }
           #nt-dark-root a.item-subject:active { color:#58a6ff!important; }
+          #nt-dark-root .theme-episode-pager { margin:24px 0 0; text-align:center; }
+          #nt-dark-root .theme-episode-pager .pg { display:flex; justify-content:center; gap:6px; }
+          #nt-dark-root .theme-episode-pager a, #nt-dark-root .theme-episode-pager strong {
+            min-width:22px; padding:7px 9px; border:1px solid #30363d; border-radius:6px;
+            color:#d7dde7; text-decoration:none; background:#161b22;
+          }
+          #nt-dark-root .theme-episode-pager strong { color:#fff; border-color:#238636; background:#238636; }
+          #nt-dark-root .theme-episode-pager .sound_only { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0,0,0,0); }
           /* 링크 클릭 시 자동으로 뷰어 모드로 진입 */
           #nt-dark-root li.list-item a { pointer-events:auto; }
         </style>`;
@@ -210,8 +237,20 @@
       t.textContent = workTitle ? workTitle.textContent.trim() : '회차 목록';
       root.appendChild(t);
       root.appendChild(listBody);
+      if (episodePager) {
+        episodePager.querySelectorAll('a[href]').forEach(a => {
+          const url = new URL(a.getAttribute('href'), location.href);
+          url.searchParams.set('ntlist', '1');
+          a.href = url.pathname + url.search + url.hash;
+        });
+        root.appendChild(episodePager);
+      }
       document.body.innerHTML = '';
       document.body.appendChild(root);
+      if (targetItem) {
+        targetItem.classList.add('nt-current');
+        requestAnimationFrame(() => targetItem.scrollIntoView({ block: 'center' }));
+      }
 
       // P3: 읽은 회차 흐리게 표시
       try {
@@ -549,9 +588,16 @@
       nav.appendChild(b);
     }
   }
+  const m = episodeText.match(/(\d+)\s*화/);
   navBtn(prevUrl, '이전화', '◀', '');
   navBtn(nextUrl, '다음화', '▶', 'primary');
-  if (listUrl) navBtn(listUrl + (listUrl.includes('?') ? '&' : '?') + 'ntlist=1', '목록', '☰', '');
+  if (listUrl) {
+    const url = new URL(listUrl, location.href);
+    url.searchParams.set('ntlist', '1');
+    if (episodeInfo) url.searchParams.set('ntep', episodeInfo.episodeId);
+    if (m) url.searchParams.set('ntno', m[1]);
+    navBtn(url.href, '목록', '☰', '');
+  }
 
   const exit = document.createElement('a');
   exit.href = '#'; exit.className = 'origin';
@@ -563,7 +609,6 @@
   });
   nav.appendChild(exit);
 
-  const m = episodeText.match(/(\d+)\s*화/);
   if (m) {
     const pos = document.createElement('span');
     pos.className = 'nt-pos';

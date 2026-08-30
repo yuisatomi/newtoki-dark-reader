@@ -36,6 +36,11 @@ if (-not $source.Contains("window.addEventListener('pagehide'")) { throw 'Final 
 if (-not $source.Contains('remote.episode_id === episodeInfo.episodeId')) { throw 'Remote episode position is not restored.' }
 if (-not $source.Contains("document.querySelector('.page-desc')?.textContent || titleText")) { throw 'Original episode metadata is not captured.' }
 if (-not $source.Contains('episodeText.match(/(\d+)\s*화/)')) { throw 'Episode number is still restricted to the viewer title.' }
+if (-not $source.Contains("document.querySelector('.theme-episode-pager')")) { throw 'Episode pagination is missing from list mode.' }
+if (-not $source.Contains("url.searchParams.set('ntlist', '1')")) { throw 'Episode pagination leaves list mode.' }
+if (-not $source.Contains(':not(.wr-subject):not(.wr-num)')) { throw 'Episode numbers are hidden in list mode.' }
+if (-not $source.Contains("url.searchParams.set('ntep', episodeInfo.episodeId)")) { throw 'Current episode is not passed to list mode.' }
+if (-not $source.Contains("targetItem.scrollIntoView({ block: 'center' })")) { throw 'Current episode is not centered in list mode.' }
 $buildCall = $source.IndexOf('    buildViewer();')
 $readWrite = $source.IndexOf("localStorage.setItem('ntRead:")
 if ($buildCall -lt 0 -or $readWrite -lt $buildCall) { throw 'Episode is marked read before the viewer succeeds.' }
