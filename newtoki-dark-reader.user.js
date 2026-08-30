@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         뉴토끼 다크 리더 (본문 전용 뷰어)
 // @namespace    nt-dark-reader
-// @version      5.8
+// @version      5.9
 // @description  뉴토끼 소설/웹툰: 야간 다크/주간 종이색 본문 뷰어와 기기 간 읽기 위치 동기화
 // @homepageURL  https://github.com/yuisatomi/newtoki-dark-reader
 // @updateURL    https://raw.githubusercontent.com/yuisatomi/newtoki-dark-reader/main/newtoki-dark-reader.user.js
@@ -779,6 +779,9 @@
   library.innerHTML = '<span class="nt-ico">📚</span><span class="nt-label"> 읽던 작품</span>';
   library.addEventListener('click', openReadLibrary);
   nav.appendChild(library);
+  const manualSaveButton = document.createElement('button');
+  manualSaveButton.innerHTML = '<span class="nt-ico">💾</span><span class="nt-label"> 저장</span>';
+  nav.appendChild(manualSaveButton);
 
   const exit = document.createElement('a');
   exit.href = '#'; exit.className = 'origin';
@@ -960,6 +963,25 @@
     const delay = Math.max(0, 5000 - (Date.now() - lastRemoteSave));
     remoteSaveTimer = setTimeout(() => saveRemoteProgress(ratio), delay);
   }
+
+  manualSaveButton.addEventListener('click', () => {
+    const ratio = currentRatio();
+    try {
+      localStorage.setItem(scrollKey, String(ratio));
+      localStorage.setItem('ntRead:' + episodeInfo.kind + ':' + episodeInfo.workId, episodeInfo.episodeId);
+    } catch (e) {}
+    rememberReadWork(workTitle, m ? m[1] : '');
+    manualSaveButton.disabled = true;
+    manualSaveButton.innerHTML = '<span class="nt-ico">⏳</span><span class="nt-label"> 저장 중</span>';
+    const pending = getSyncToken() ? saveRemoteProgress(ratio) : Promise.resolve();
+    pending.finally(() => {
+      manualSaveButton.innerHTML = '<span class="nt-ico">✓</span><span class="nt-label"> 저장됨</span>';
+      setTimeout(() => {
+        manualSaveButton.disabled = false;
+        manualSaveButton.innerHTML = '<span class="nt-ico">💾</span><span class="nt-label"> 저장</span>';
+      }, 1500);
+    });
+  });
 
   window.addEventListener('scroll', () => {
     const y = window.scrollY;
