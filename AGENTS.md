@@ -10,3 +10,10 @@
 - 배포 후 raw 주소의 `@version`이 소스 버전과 같은지 확인한다.
 - 배포가 실패하면 강제 푸시하지 않는다. 원격 `main`을 다시 가져와 그 위에 스크립트만 재적용한다.
 
+## 동기화 서버
+
+- 서버 소스는 `server/reader_sync.py`, 서비스 파일은 `server/reader-sync.service`에서 관리한다.
+- LXC 실행 경로는 `/opt/reader-sync/reader_sync.py`, systemd 서비스 이름은 `reader-sync`다.
+- 공개 API 주소는 `https://reader-sync.flolim.com`이며 `/health`로 상태를 확인한다.
+- 서버 변경 전 `python server/reader_sync.py --self-test`와 `test-server.ps1`을 모두 통과시킨다.
+- 서버 파일을 교체한 뒤 `reader-sync` 서비스를 재시작하고, 기존 DB를 보존한 상태에서 `/health`와 실제 API를 확인한다.

@@ -72,7 +72,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type")
-        self.send_header("Access-Control-Allow-Methods", "GET, PUT, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, PUT, DELETE, OPTIONS")
         self.end_headers()
         self.wfile.write(body)
 
@@ -112,6 +112,14 @@ class Handler(BaseHTTPRequestHandler):
         query = parse_qs(parsed.query)
         kind = query.get("kind", [""])[0]
         work_id = query.get("work_id", [""])[0]
+        if not kind and not work_id:
+            with connect() as db:
+                rows = db.execute(
+                    "SELECT kind, work_id, episode_id, position, title, device_id, updated_at "
+                    "FROM progress ORDER BY updated_at DESC"
+                ).fetchall()
+            self.send_json(200, {"progress": [dict(row) for row in rows]})
+            return
         if kind not in ("novel", "webtoon") or not valid_id(work_id):
             self.send_json(400, {"error": "kind and work_id are required"})
             return
@@ -152,6 +160,23 @@ class Handler(BaseHTTPRequestHandler):
                     updated_at=excluded.updated_at
             """, (kind, work_id, episode_id, position, title, device_id, updated_at))
         self.send_json(200, {"ok": True, "updated_at": updated_at})
+
+    def do_DELETE(self):
+        parsed = urlparse(self.path)
+        if parsed.path != "/v1/progress":
+            self.send_json(404, {"error": "not found"})
+            return
+        if not self.require_access():
+            return
+        query = parse_qs(parsed.query)
+        kind = query.get("kind", [""])[0]
+        work_id = query.get("work_id", [""])[0]
+        if kind not in ("novel", "webtoon") or not valid_id(work_id):
+            self.send_json(400, {"error": "kind and work_id are required"})
+            return
+        with connect() as db:
+            db.execute("DELETE FROM progress WHERE kind=? AND work_id=?", (kind, work_id))
+        self.send_json(200, {"ok": True})
 
 
 def self_test():

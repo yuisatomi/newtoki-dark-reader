@@ -52,6 +52,8 @@ if (-not $source.Contains('metadataQueue = metadataQueue.then')) { throw 'Legacy
 if (-not $source.Contains("manualSaveButton.addEventListener('click'")) { throw 'Manual progress save control is missing.' }
 if (-not $source.Contains("localStorage.setItem('ntRead:' + episodeInfo.kind")) { throw 'Manual save does not store the current episode.' }
 if (-not $source.Contains('getSyncToken() ? saveRemoteProgress(ratio)')) { throw 'Manual save does not sync the current position.' }
+if (-not $source.Contains("syncRequest('GET', '/v1/progress')")) { throw 'Remote saved-work list is not loaded.' }
+if (-not $source.Contains("syncRequest('DELETE', '/v1/progress?kind='")) { throw 'Remote saved-work deletion is missing.' }
 $buildCall = $source.IndexOf('    buildViewer();')
 $readWrite = $source.IndexOf("localStorage.setItem('ntRead:")
 if ($buildCall -lt 0 -or $readWrite -lt $buildCall) { throw 'Episode is marked read before the viewer succeeds.' }
