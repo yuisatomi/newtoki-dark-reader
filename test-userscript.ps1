@@ -46,6 +46,9 @@ if (-not $source.Contains('injectLibraryButton(isEpisodePage)')) { throw 'Site-w
 if (-not $source.Contains("library.addEventListener('click', openReadLibrary)")) { throw 'Viewer navigation cannot open the read library.' }
 if (-not $source.Contains('saveReadLibrary(getReadLibrary().filter')) { throw 'Read library entries cannot be deleted.' }
 if (-not $source.Contains("open.textContent = '이어보기'")) { throw 'Read library entries cannot be resumed.' }
+if (-not $source.Contains('async function refreshReadMetadata')) { throw 'Legacy read metadata cannot be recovered.' }
+if (-not $source.Contains('doc.querySelector(''meta[name="description"]'')')) { throw 'Episode metadata description is not parsed.' }
+if (-not $source.Contains('metadataQueue = metadataQueue.then')) { throw 'Legacy metadata requests are not rate-limited.' }
 $buildCall = $source.IndexOf('    buildViewer();')
 $readWrite = $source.IndexOf("localStorage.setItem('ntRead:")
 if ($buildCall -lt 0 -or $readWrite -lt $buildCall) { throw 'Episode is marked read before the viewer succeeds.' }
