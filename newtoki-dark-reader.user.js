@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         뉴토끼 다크 리더 (본문 전용 뷰어)
 // @namespace    nt-dark-reader
-// @version      5.9
+// @version      5.10
 // @description  뉴토끼 소설/웹툰: 야간 다크/주간 종이색 본문 뷰어와 기기 간 읽기 위치 동기화
 // @homepageURL  https://github.com/yuisatomi/newtoki-dark-reader
 // @updateURL    https://raw.githubusercontent.com/yuisatomi/newtoki-dark-reader/main/newtoki-dark-reader.user.js
@@ -258,7 +258,38 @@
       episode.textContent = '작품 정보를 불러오지 못했습니다.';
     }
   }
-  function openReadLibrary() {
+  async function mergeRemoteReadLibrary() {
+    if (!getSyncToken()) return;
+    const result = await syncRequest('GET', '/v1/progress');
+    if (!Array.isArray(result.progress)) return;
+    const records = getReadLibrary();
+    const byKey = new Map(records.map(record => [record.key, record]));
+    result.progress.forEach(remote => {
+      if (!remote || !['novel', 'webtoon'].includes(remote.kind) || !remote.work_id || !remote.episode_id) return;
+      const key = remote.kind + ':' + remote.work_id;
+      const saved = byKey.get(key);
+      if (saved && (saved.updatedAt || 0) >= (remote.updated_at || 0)) return;
+      if (saved) {
+        saved.episodeId = remote.episode_id;
+        saved.episodeNumber = '';
+        saved.updatedAt = remote.updated_at || 0;
+      } else {
+        const record = {
+          key,
+          kind: remote.kind,
+          workId: remote.work_id,
+          episodeId: remote.episode_id,
+          episodeNumber: '',
+          workTitle: (remote.kind === 'novel' ? '소설 ' : '웹툰 ') + remote.work_id,
+          updatedAt: remote.updated_at || 0
+        };
+        records.push(record);
+        byKey.set(key, record);
+      }
+    });
+    saveReadLibrary(records);
+  }
+  async function openReadLibrary() {
     document.getElementById('nt-library-dialog')?.remove();
     const dialog = document.createElement('dialog');
     dialog.id = 'nt-library-dialog';
@@ -279,7 +310,19 @@
       #nt-library-dialog .nt-lib-empty { padding:28px 0; color:#8b949e; text-align:center; }
     </style><header><h2>📚 읽던 작품</h2><button type="button" aria-label="닫기">✕</button></header><div class="nt-lib-list"></div>`;
     const list = dialog.querySelector('.nt-lib-list');
-    const records = migrateLegacyReads();
+    dialog.querySelector('header button').addEventListener('click', () => dialog.close());
+    dialog.addEventListener('close', () => dialog.remove(), { once: true });
+    document.body.appendChild(dialog);
+    dialog.showModal();
+    let records = migrateLegacyReads();
+    if (getSyncToken()) {
+      const loading = document.createElement('div');
+      loading.className = 'nt-lib-empty'; loading.textContent = '다른 기기의 저장 목록 동기화 중…';
+      list.appendChild(loading);
+      try { await mergeRemoteReadLibrary(); records = migrateLegacyReads(); } catch (e) {}
+      if (!dialog.isConnected) return;
+      list.innerHTML = '';
+    }
     if (!records.length) {
       const empty = document.createElement('div');
       empty.className = 'nt-lib-empty';
@@ -311,14 +354,20 @@
       remove.type = 'button'; remove.className = 'nt-lib-delete'; remove.textContent = '삭제';
       remove.addEventListener('click', () => {
         if (!confirm('이 작품의 저장 기록을 삭제할까요?')) return;
-        saveReadLibrary(getReadLibrary().filter(item => item.key !== record.key));
-        try { localStorage.removeItem('ntRead:' + record.kind + ':' + record.workId); } catch (e) {}
-        row.remove();
-        if (!list.querySelector('.nt-lib-item')) {
-          const empty = document.createElement('div');
-          empty.className = 'nt-lib-empty'; empty.textContent = '저장된 작품이 없습니다.';
-          list.appendChild(empty);
-        }
+        const finish = () => {
+          saveReadLibrary(getReadLibrary().filter(item => item.key !== record.key));
+          try { localStorage.removeItem('ntRead:' + record.kind + ':' + record.workId); } catch (e) {}
+          row.remove();
+          if (!list.querySelector('.nt-lib-item')) {
+            const empty = document.createElement('div');
+            empty.className = 'nt-lib-empty'; empty.textContent = '저장된 작품이 없습니다.';
+            list.appendChild(empty);
+          }
+        };
+        if (!getSyncToken()) { finish(); return; }
+        remove.disabled = true;
+        syncRequest('DELETE', '/v1/progress?kind=' + record.kind + '&work_id=' + encodeURIComponent(record.workId))
+          .then(finish).catch(() => { remove.disabled = false; alert('서버에서 삭제하지 못했습니다. 연결을 확인하세요.'); });
       });
       row.append(info, open, remove);
       list.appendChild(row);
@@ -327,10 +376,6 @@
         metadataQueue = metadataQueue.then(() => refreshReadMetadata(record, title, episode));
       }
     });
-    dialog.querySelector('header button').addEventListener('click', () => dialog.close());
-    dialog.addEventListener('close', () => dialog.remove(), { once: true });
-    document.body.appendChild(dialog);
-    dialog.showModal();
   }
   function injectLibraryButton(raised) {
     if (document.getElementById('nt-library-btn')) return;
