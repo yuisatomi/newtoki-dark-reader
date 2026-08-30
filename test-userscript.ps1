@@ -57,6 +57,9 @@ if (-not $source.Contains("syncRequest('DELETE', '/v1/progress?kind='")) { throw
 if (-not $source.Contains("uploads.slice(i, i + 4).map(data => syncRequest('PUT', '/v1/progress', data))")) { throw 'Existing local read library is not uploaded.' }
 if (-not $source.Contains('if (getSyncToken()) syncReadLibrary().catch(() => {});')) { throw 'Read libraries are not synchronized automatically.' }
 if (-not $source.Contains('readLibrarySyncPromise = mergeRemoteReadLibrary().finally')) { throw 'Concurrent read-library synchronization is not deduplicated.' }
+if (-not $source.Contains('if (remote.deleted)')) { throw 'Remote deletions are not applied locally.' }
+if (-not $source.Contains('if (remote?.deleted) return false;')) { throw 'Deleted works can be re-uploaded from another device.' }
+if (-not $source.Contains("localStorage.removeItem('ntRead:' + remote.kind")) { throw 'Remote deletions can be recreated from legacy storage.' }
 if (-not $source.Contains("error.textContent = '동기화 실패: ' + e.message")) { throw 'Library sync failures remain hidden.' }
 if (-not $source.Contains('manualSaveButton.innerHTML = ''<span class="nt-ico">⚠</span><span class="nt-label"> 동기화 실패</span>''')) { throw 'Manual remote-save failures remain hidden.' }
 $buildCall = $source.IndexOf('    buildViewer();')

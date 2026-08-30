@@ -35,9 +35,13 @@ def init_db():
                 title TEXT NOT NULL DEFAULT '',
                 device_id TEXT NOT NULL DEFAULT '',
                 updated_at INTEGER NOT NULL,
+                deleted INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (kind, work_id)
             )
         """)
+        columns = {row[1] for row in db.execute("PRAGMA table_info(progress)")}
+        if "deleted" not in columns:
+            db.execute("ALTER TABLE progress ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0")
 
 
 def valid_id(value):
@@ -115,7 +119,7 @@ class Handler(BaseHTTPRequestHandler):
         if not kind and not work_id:
             with connect() as db:
                 rows = db.execute(
-                    "SELECT kind, work_id, episode_id, position, title, device_id, updated_at "
+                    "SELECT kind, work_id, episode_id, position, title, device_id, updated_at, deleted "
                     "FROM progress ORDER BY updated_at DESC"
                 ).fetchall()
             self.send_json(200, {"progress": [dict(row) for row in rows]})
@@ -125,8 +129,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         with connect() as db:
             row = db.execute(
-                "SELECT kind, work_id, episode_id, position, title, device_id, updated_at "
-                "FROM progress WHERE kind=? AND work_id=?",
+                "SELECT kind, work_id, episode_id, position, title, device_id, updated_at, deleted "
+                "FROM progress WHERE kind=? AND work_id=? AND deleted=0",
                 (kind, work_id),
             ).fetchone()
         self.send_json(200, {"progress": dict(row) if row else None})
@@ -157,7 +161,8 @@ class Handler(BaseHTTPRequestHandler):
                     position=excluded.position,
                     title=excluded.title,
                     device_id=excluded.device_id,
-                    updated_at=excluded.updated_at
+                    updated_at=excluded.updated_at,
+                    deleted=0
             """, (kind, work_id, episode_id, position, title, device_id, updated_at))
         self.send_json(200, {"ok": True, "updated_at": updated_at})
 
@@ -174,8 +179,16 @@ class Handler(BaseHTTPRequestHandler):
         if kind not in ("novel", "webtoon") or not valid_id(work_id):
             self.send_json(400, {"error": "kind and work_id are required"})
             return
+        updated_at = int(time.time() * 1000)
         with connect() as db:
-            db.execute("DELETE FROM progress WHERE kind=? AND work_id=?", (kind, work_id))
+            db.execute("""
+                INSERT INTO progress
+                    (kind, work_id, episode_id, position, title, device_id, updated_at, deleted)
+                VALUES (?, ?, '', 0, '', '', ?, 1)
+                ON CONFLICT(kind, work_id) DO UPDATE SET
+                    updated_at=excluded.updated_at,
+                    deleted=1
+            """, (kind, work_id, updated_at))
         self.send_json(200, {"ok": True})
 
 

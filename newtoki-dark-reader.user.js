@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         뉴토끼 다크 리더 (본문 전용 뷰어)
 // @namespace    nt-dark-reader
-// @version      5.11
+// @version      5.12
 // @description  뉴토끼 소설/웹툰: 야간 다크/주간 종이색 본문 뷰어와 기기 간 읽기 위치 동기화
 // @homepageURL  https://github.com/yuisatomi/newtoki-dark-reader
 // @updateURL    https://raw.githubusercontent.com/yuisatomi/newtoki-dark-reader/main/newtoki-dark-reader.user.js
@@ -266,6 +266,7 @@
     const uploads = getReadLibrary().filter(record => {
       if (!['novel', 'webtoon'].includes(record?.kind) || !record.workId || !record.episodeId) return false;
       const remote = remoteByKey.get(record.key);
+      if (remote?.deleted) return false;
       return !remote || (record.updatedAt || 0) > (remote.updated_at || 0);
     }).map(record => {
       let position = 0;
@@ -289,9 +290,17 @@
     const records = getReadLibrary();
     const byKey = new Map(records.map(record => [record.key, record]));
     result.progress.forEach(remote => {
-      if (!remote || !['novel', 'webtoon'].includes(remote.kind) || !remote.work_id || !remote.episode_id) return;
+      if (!remote || !['novel', 'webtoon'].includes(remote.kind) || !remote.work_id) return;
       const key = remote.kind + ':' + remote.work_id;
       const saved = byKey.get(key);
+      if (remote.deleted) {
+        const index = saved ? records.indexOf(saved) : -1;
+        if (index >= 0) records.splice(index, 1);
+        byKey.delete(key);
+        try { localStorage.removeItem('ntRead:' + remote.kind + ':' + remote.work_id); } catch (e) {}
+        return;
+      }
+      if (!remote.episode_id) return;
       if (saved && (saved.updatedAt || 0) >= (remote.updated_at || 0)) return;
       if (saved) {
         saved.episodeId = remote.episode_id;
