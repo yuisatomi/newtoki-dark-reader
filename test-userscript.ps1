@@ -49,6 +49,9 @@ if (-not $source.Contains("open.textContent = '이어보기'")) { throw 'Read li
 if (-not $source.Contains('async function refreshReadMetadata')) { throw 'Legacy read metadata cannot be recovered.' }
 if (-not $source.Contains('doc.querySelector(''meta[name="description"]'')')) { throw 'Episode metadata description is not parsed.' }
 if (-not $source.Contains('metadataQueue = metadataQueue.then')) { throw 'Legacy metadata requests are not rate-limited.' }
+if (-not $source.Contains("manualSaveButton.addEventListener('click'")) { throw 'Manual progress save control is missing.' }
+if (-not $source.Contains("localStorage.setItem('ntRead:' + episodeInfo.kind")) { throw 'Manual save does not store the current episode.' }
+if (-not $source.Contains('getSyncToken() ? saveRemoteProgress(ratio)')) { throw 'Manual save does not sync the current position.' }
 $buildCall = $source.IndexOf('    buildViewer();')
 $readWrite = $source.IndexOf("localStorage.setItem('ntRead:")
 if ($buildCall -lt 0 -or $readWrite -lt $buildCall) { throw 'Episode is marked read before the viewer succeeds.' }
