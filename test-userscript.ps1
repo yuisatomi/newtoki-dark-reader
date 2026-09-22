@@ -14,6 +14,10 @@ if (-not $source.Contains('e.stopImmediatePropagation()')) { throw 'Viewer navig
 if ($source.Contains('a.href = href;')) { throw 'Viewer navigation still exposes links to the site router.' }
 if ($source.Contains('if (!bodyEl) return;')) { throw 'Missing async body container still aborts viewer startup.' }
 if (-not $source.Contains('if (!el) return false;')) { throw 'Body readiness does not wait for the container.' }
+if (-not $source.Contains("host === 'toki31.com' || host.endsWith('.toki31.com')")) { throw 'toki31 is not recognized automatically.' }
+if (-not $source.Contains(".theme-viewer-images, .vw-imgs")) { throw 'toki31 webtoon body selector is missing.' }
+if (-not $source.Contains("document.querySelector('.vw-work')?.textContent.trim()")) { throw 'toki31 work title selector is missing.' }
+if (-not $source.Contains("document.querySelector('.vw-ep')?.textContent.match(/\d+\s*화/)")) { throw 'toki31 episode title selector is missing.' }
 if (-not $source.Contains('el.shadowRoot.textContent')) { throw 'Novel readiness ignores Shadow DOM content.' }
 if (-not $source.Contains("addEventListener('novel-content-ready'")) { throw 'Novel completion event is not observed.' }
 if (-not $source.Contains('// @updateURL    https://raw.githubusercontent.com/yuisatomi/newtoki-dark-reader/main/newtoki-dark-reader.user.js')) { throw 'Automatic update URL is missing.' }
