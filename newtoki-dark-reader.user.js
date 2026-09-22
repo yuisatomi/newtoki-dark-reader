@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         뉴토끼 다크 리더 (본문 전용 뷰어)
 // @namespace    nt-dark-reader
-// @version      5.13
-// @description  뉴토끼 소설/웹툰: 야간 다크/주간 종이색 본문 뷰어와 기기 간 읽기 위치 동기화
+// @version      5.14
+// @description  뉴토끼/toki31 소설·웹툰: 야간 다크/주간 종이색 본문 뷰어와 기기 간 읽기 위치 동기화
 // @homepageURL  https://github.com/yuisatomi/newtoki-dark-reader
 // @updateURL    https://raw.githubusercontent.com/yuisatomi/newtoki-dark-reader/main/newtoki-dark-reader.user.js
 // @downloadURL  https://raw.githubusercontent.com/yuisatomi/newtoki-dark-reader/main/newtoki-dark-reader.user.js
@@ -20,7 +20,7 @@
 
   /* ============================================================
      도메인 매칭 (옵션1: 자동 인식 + 옵션2: 사용자 추가 도메인)
-     - 호스트명에 "newtoki" 포함 → 자동 인식 (번호/도메인 변경 무관)
+     - 호스트명에 "newtoki" 포함 또는 toki31.com → 자동 인식
      - 사용자가 추가한 도메인 → GM_setValue로 영구 저장
      ============================================================ */
   const USER_DOMAINS_KEY = 'ntReaderUserDomains';
@@ -76,6 +76,7 @@
   function hostMatches(host) {
     if (!host) return false;
     if (host.includes('newtoki')) return true;               // 자동 인식
+    if (host === 'toki31.com' || host.endsWith('.toki31.com')) return true;
     return getUserDomains().some(d =>                        // 사용자 추가 (B4: 정확 매칭만)
       host === d || host.endsWith('.' + d)
     );
@@ -567,11 +568,19 @@
 
   /* ================= 뷰어 모드 ================= */
 
-  let titleEl = document.querySelector('.theme-viewer-title, .theme-novel-title, h3');
+  function getTitleText() {
+    const tokiWork = document.querySelector('.vw-work')?.textContent.trim();
+    if (tokiWork) {
+      const tokiEpisode = document.querySelector('.vw-ep')?.textContent.match(/\d+\s*화/)?.[0];
+      return [tokiWork, tokiEpisode].filter(Boolean).join(' ');
+    }
+    return document.querySelector('.theme-viewer-title, .theme-novel-title, h3')?.textContent.trim()
+      || document.title;
+  }
   function getBodyEl() {
     return isNovelEp
       ? document.querySelector('[data-theme-novel-content], .theme-novel-content')
-      : document.querySelector('[data-theme-viewer-images], .theme-viewer-images');
+      : document.querySelector('[data-theme-viewer-images], .theme-viewer-images, .vw-imgs');
   }
   let bodyEl = getBodyEl();
 
@@ -633,11 +642,10 @@
     }
 
     bodyEl = getBodyEl() || bodyEl;
-    titleEl = document.querySelector('.theme-viewer-title, .theme-novel-title, h3') || titleEl;
     prevUrl = findNavBtn('이전화') || prevUrl;
     nextUrl = findNavBtn('다음화') || nextUrl;
     listUrl = findNavBtn('목록') || listUrl;
-    titleText = titleEl ? titleEl.textContent.trim() : document.title;
+    titleText = getTitleText();
     buildViewer();   // 아래 정의된 실제 뷰어 구성 함수
 
     // 본문을 실제로 표시한 뒤에만 읽은 회차로 기록한다.
@@ -657,7 +665,7 @@
   let prevUrl = findNavBtn('이전화');
   let nextUrl = findNavBtn('다음화');
   let listUrl = findNavBtn('목록');
-  let titleText = titleEl ? titleEl.textContent.trim() : document.title;
+  let titleText = getTitleText();
 
   /* ---------- 실제 뷰어 구성 (본문 준비 완료 후 호출) ---------- */
   function buildViewer() {
@@ -666,6 +674,7 @@
   const workTitle = [...document.querySelectorAll('a[href]')]
     .filter(a => a.pathname.replace(/\/$/, '') === workPath)
     .map(a => a.textContent.trim()).filter(text => text && text !== '목록').sort((a, b) => b.length - a.length)[0]
+    || document.querySelector('.vw-work')?.textContent.trim()
     || document.querySelector('.page-header h1, .page-header h2')?.childNodes[0]?.textContent.trim()
     || titleText;
   document.head.querySelectorAll('link[rel="stylesheet"], style').forEach(el => el.remove());
