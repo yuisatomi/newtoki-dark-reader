@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         뉴토끼 다크 리더 (본문 전용 뷰어)
 // @namespace    nt-dark-reader
-// @version      5.12
+// @version      5.13
 // @description  뉴토끼 소설/웹툰: 야간 다크/주간 종이색 본문 뷰어와 기기 간 읽기 위치 동기화
 // @homepageURL  https://github.com/yuisatomi/newtoki-dark-reader
 // @updateURL    https://raw.githubusercontent.com/yuisatomi/newtoki-dark-reader/main/newtoki-dark-reader.user.js
@@ -590,8 +590,7 @@
     // 웹툰: 모바일/데스크톱 래퍼 구조와 무관하게 실제 로드된 이미지를 확인
     if (el.querySelector('.is-error, .theme-viewer-error')) return true;
     const images = [...el.querySelectorAll('img')];
-    const loaded = images.filter(img => img.complete && img.naturalWidth > 0).length;
-    return images.length > 0 && loaded >= Math.min(images.length, 3);
+    return images.some(img => img.complete && img.naturalWidth > 0);
   }
 
   function waitForBody(timeoutMs) {
