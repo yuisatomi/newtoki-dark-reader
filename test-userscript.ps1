@@ -9,6 +9,7 @@ if ($source.Contains('nextFired')) { throw 'Automatic next-episode navigation re
 if ($source.Contains('nt-wait-overlay')) { throw 'Blocking wait overlay remains.' }
 if (-not $source.Contains('if (atBottom)')) { throw 'Bottom navigation reveal is missing.' }
 if ($source.Contains('if (!holders.length) return true')) { throw 'Mobile webtoon can bypass image readiness.' }
+if (-not $source.Contains('images.some(img => img.complete && img.naturalWidth > 0)')) { throw 'Webtoon viewer still waits for multiple lazy-loaded images.' }
 if (-not $source.Contains('e.stopImmediatePropagation()')) { throw 'Viewer navigation can still be intercepted by the site router.' }
 if ($source.Contains('a.href = href;')) { throw 'Viewer navigation still exposes links to the site router.' }
 if ($source.Contains('if (!bodyEl) return;')) { throw 'Missing async body container still aborts viewer startup.' }
