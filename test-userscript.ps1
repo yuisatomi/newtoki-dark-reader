@@ -18,6 +18,11 @@ if (-not $source.Contains("host === 'toki31.com' || host.endsWith('.toki31.com')
 if (-not $source.Contains(".theme-viewer-images, .vw-imgs")) { throw 'toki31 webtoon body selector is missing.' }
 if (-not $source.Contains("document.querySelector('.vw-work')?.textContent.trim()")) { throw 'toki31 work title selector is missing.' }
 if (-not $source.Contains("document.querySelector('.vw-ep')?.textContent.match(/\d+\s*화/)")) { throw 'toki31 episode title selector is missing.' }
+if (-not $source.Contains(".novel-viewer > div:last-child")) { throw 'toki31 novel body selector is missing.' }
+if (-not $source.Contains('novelContentReady || el.scrollHeight > 20')) { throw 'toki31 closed Shadow DOM readiness is missing.' }
+if (-not $source.Contains("document.querySelectorAll('.crumb a[href]')")) { throw 'toki31 novel work title selector is missing.' }
+if (-not $source.Contains("document.querySelector('.ne-h1')?.textContent.trim()")) { throw 'toki31 novel episode title selector is missing.' }
+if (-not $source.Contains("replace(/^‹\s*|\s*›$/g, '') === label")) { throw 'toki31 decorated episode navigation is unsupported.' }
 if (-not $source.Contains('el.shadowRoot.textContent')) { throw 'Novel readiness ignores Shadow DOM content.' }
 if (-not $source.Contains("addEventListener('novel-content-ready'")) { throw 'Novel completion event is not observed.' }
 if (-not $source.Contains('// @updateURL    https://raw.githubusercontent.com/yuisatomi/newtoki-dark-reader/main/newtoki-dark-reader.user.js')) { throw 'Automatic update URL is missing.' }

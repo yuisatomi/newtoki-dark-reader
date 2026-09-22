@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         뉴토끼 다크 리더 (본문 전용 뷰어)
 // @namespace    nt-dark-reader
-// @version      5.14
+// @version      5.15
 // @description  뉴토끼/toki31 소설·웹툰: 야간 다크/주간 종이색 본문 뷰어와 기기 간 읽기 위치 동기화
 // @homepageURL  https://github.com/yuisatomi/newtoki-dark-reader
 // @updateURL    https://raw.githubusercontent.com/yuisatomi/newtoki-dark-reader/main/newtoki-dark-reader.user.js
@@ -574,15 +574,23 @@
       const tokiEpisode = document.querySelector('.vw-ep')?.textContent.match(/\d+\s*화/)?.[0];
       return [tokiWork, tokiEpisode].filter(Boolean).join(' ');
     }
+    if (isNovelEp && episodeInfo) {
+      const workPath = '/novel/' + episodeInfo.workId;
+      const novelWork = [...document.querySelectorAll('.crumb a[href]')]
+        .find(a => a.pathname.replace(/\/$/, '') === workPath)?.textContent.trim();
+      const novelEpisode = document.querySelector('.ne-h1')?.textContent.trim();
+      if (novelWork || novelEpisode) return [novelWork, novelEpisode].filter(Boolean).join(' ');
+    }
     return document.querySelector('.theme-viewer-title, .theme-novel-title, h3')?.textContent.trim()
       || document.title;
   }
   function getBodyEl() {
     return isNovelEp
-      ? document.querySelector('[data-theme-novel-content], .theme-novel-content')
+      ? document.querySelector('[data-theme-novel-content], .theme-novel-content, .novel-viewer > div:last-child')
       : document.querySelector('[data-theme-viewer-images], .theme-viewer-images, .vw-imgs');
   }
   let bodyEl = getBodyEl();
+  let novelContentReady = false;
 
   /* ---------- 옵션 A: 광고 검증(ack) 완료까지 대기 후 뷰어 전환 ----------
      사이트는 광고 챌린지 성공(ntk-ad-ack-ready / __ntk_ad_ack_scope 세팅) 후에야
@@ -593,6 +601,8 @@
     const el = getBodyEl() || bodyEl;
     if (!el) return false;
     if (isNovelEp) {
+      // toki31은 닫힌 Shadow DOM을 사용하므로 완료 이벤트나 렌더링 높이로 판정한다.
+      if (el.matches('.novel-viewer > div:last-child')) return novelContentReady || el.scrollHeight > 20;
       // 소설 본문은 로딩 완료 후 open Shadow DOM 안에 렌더링된다.
       return !!el.shadowRoot && (el.shadowRoot.textContent || '').trim().length > 0;
     }
@@ -608,7 +618,7 @@
       const started = Date.now();
       // 사이트 이벤트 기반 조기 완료
       const onAck = () => setTimeout(check, 400);
-      const onNovelReady = () => check();
+      const onNovelReady = () => { novelContentReady = true; check(); };
       window.addEventListener('ntk-ad-ack-ready', onAck, { once: true });
       window.addEventListener('novel-content-ready', onNovelReady, { once: true });
       const timer = setInterval(check, 300);
@@ -658,7 +668,7 @@
 
   function findNavBtn(label) {
     const a = [...document.querySelectorAll('a')].find(
-      x => x.textContent.trim() === label && x.getAttribute('href')
+      x => x.textContent.trim().replace(/^‹\s*|\s*›$/g, '') === label && x.getAttribute('href')
     );
     return a ? a.getAttribute('href') : null;
   }
