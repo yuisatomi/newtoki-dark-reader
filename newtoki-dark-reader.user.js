@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         뉴토끼 다크 리더 (본문 전용 뷰어)
 // @namespace    nt-dark-reader
-// @version      5.15
+// @version      5.16
 // @description  뉴토끼/toki31 소설·웹툰: 야간 다크/주간 종이색 본문 뷰어와 기기 간 읽기 위치 동기화
 // @homepageURL  https://github.com/yuisatomi/newtoki-dark-reader
 // @updateURL    https://raw.githubusercontent.com/yuisatomi/newtoki-dark-reader/main/newtoki-dark-reader.user.js
@@ -851,7 +851,9 @@
 
   const hint = document.createElement('div');
   hint.className = 'nt-hint';
-  hint.textContent = '화면 좌우 가장자리 클릭으로 이전/다음 화 이동';
+  hint.textContent = isNovelEp
+    ? '화면 좌우 터치로 한 화면씩 이동 · 회차 이동은 하단바'
+    : '화면 좌우 가장자리 클릭으로 이전/다음 화 이동';
   root.appendChild(hint);
 
   document.body.innerHTML = '';
@@ -1195,14 +1197,22 @@
     rememberNavigationTarget(url);
     location.href = url;
   }
-  /* 좌우 가장자리 클릭 → 이전/다음 화 (소설·웹툰 공통, P2)
-     웹툰 본문(이미지 영역) 중앙 클릭은 무시 */
+  /* 소설 좌우 탭 → 한 화면씩 이동, 웹툰 좌우 탭 → 이전/다음 화 */
   document.addEventListener('click', e => {
     if (e.target.closest('#nt-dark-nav') || e.target.closest('#nt-dark-panel')) return;
     if (!isNovelEp && e.target.closest('.nt-body')) return;
-    if (e.defaultPrevented || e.target.closest('a, button, input, select, textarea, label, [contenteditable="true"]')) return;
+    if (e.defaultPrevented || e.target.closest('a, button, input, select, textarea, label, [contenteditable="true"]')
+      || e.composedPath().some(node => node instanceof Element && node.matches('a, button, input, select, textarea, label, [contenteditable="true"]'))) return;
     if ((window.getSelection()?.toString() || '').trim()) return;
     const x = e.clientX / window.innerWidth;
+    if (isNovelEp) {
+      const edge = window.innerWidth <= 600 ? 0.35 : 0.15;
+      const direction = x < edge ? -1 : x > 1 - edge ? 1 : 0;
+      if (!direction) return;
+      const visibleHeight = window.visualViewport?.height || window.innerHeight;
+      window.scrollBy({ top: direction * Math.round(visibleHeight * 0.85), behavior: 'smooth' });
+      return;
+    }
     if (x < 0.15) go(prevUrl);
     else if (x > 0.85) go(nextUrl);
   });

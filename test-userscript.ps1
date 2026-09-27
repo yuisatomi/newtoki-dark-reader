@@ -77,5 +77,7 @@ $readWrite = $source.IndexOf("localStorage.setItem('ntRead:")
 if ($buildCall -lt 0 -or $readWrite -lt $buildCall) { throw 'Episode is marked read before the viewer succeeds.' }
 if (-not $source.Contains("e.target.closest('a, button, input, select, textarea, label")) { throw 'Edge navigation still captures interactive elements.' }
 if (-not $source.Contains('window.getSelection()?.toString()')) { throw 'Edge navigation still captures text selection.' }
+if ($source -notmatch '(?s)if \(isNovelEp\) \{\s*const edge = .*?window\.scrollBy\(\{ top: direction .*?\}\);\s*return;\s*\}\s*if \(x < 0\.15\) go\(prevUrl\)') { throw 'Novel edge tap must turn a screen without changing episodes.' }
+if (-not $source.Contains("navBtn(prevUrl, '이전화'") -or -not $source.Contains("navBtn(nextUrl, '다음화'")) { throw 'Episode navigation buttons are missing.' }
 
 Write-Host 'userscript checks passed'
