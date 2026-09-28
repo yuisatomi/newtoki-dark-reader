@@ -36,12 +36,15 @@ def init_db():
                 device_id TEXT NOT NULL DEFAULT '',
                 updated_at INTEGER NOT NULL,
                 deleted INTEGER NOT NULL DEFAULT 0,
+                revision INTEGER NOT NULL DEFAULT 1,
                 PRIMARY KEY (kind, work_id)
             )
         """)
         columns = {row[1] for row in db.execute("PRAGMA table_info(progress)")}
         if "deleted" not in columns:
             db.execute("ALTER TABLE progress ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0")
+        if "revision" not in columns:
+            db.execute("ALTER TABLE progress ADD COLUMN revision INTEGER NOT NULL DEFAULT 1")
 
 
 def valid_id(value):
@@ -61,6 +64,15 @@ def validate_progress(data):
     title = str(data.get("title", ""))[:300]
     device_id = str(data.get("device_id", ""))[:128]
     return data["kind"], data["work_id"], data["episode_id"], position, title, device_id
+
+
+def expected_revision(data):
+    if "expected_revision" not in data:
+        return None  # Legacy client: same-episode updates only.
+    value = data["expected_revision"]
+    if type(value) is not int or value < 0:
+        raise ValueError("invalid expected revision")
+    return value
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -119,7 +131,7 @@ class Handler(BaseHTTPRequestHandler):
         if not kind and not work_id:
             with connect() as db:
                 rows = db.execute(
-                    "SELECT kind, work_id, episode_id, position, title, device_id, updated_at, deleted "
+                    "SELECT kind, work_id, episode_id, position, title, device_id, updated_at, deleted, revision "
                     "FROM progress ORDER BY updated_at DESC"
                 ).fetchall()
             self.send_json(200, {"progress": [dict(row) for row in rows]})
@@ -129,11 +141,13 @@ class Handler(BaseHTTPRequestHandler):
             return
         with connect() as db:
             row = db.execute(
-                "SELECT kind, work_id, episode_id, position, title, device_id, updated_at, deleted "
-                "FROM progress WHERE kind=? AND work_id=? AND deleted=0",
+                "SELECT kind, work_id, episode_id, position, title, device_id, updated_at, deleted, revision "
+                "FROM progress WHERE kind=? AND work_id=?" +
+                ("" if query.get("include_deleted", [""])[0] == "1" else " AND deleted=0"),
                 (kind, work_id),
             ).fetchone()
-        self.send_json(200, {"progress": dict(row) if row else None})
+        self.send_json(200, {"progress": dict(row) if row else None,
+                             "revision": row["revision"] if row else 0})
 
     def do_PUT(self):
         if urlparse(self.path).path != "/v1/progress":
@@ -147,24 +161,53 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError("invalid content length")
             data = json.loads(self.rfile.read(length))
             kind, work_id, episode_id, position, title, device_id = validate_progress(data)
+            expected = expected_revision(data)
+            allow_rewind = data.get("allow_rewind", False)
+            if type(allow_rewind) is not bool or (allow_rewind and expected is None):
+                raise ValueError("invalid allow_rewind")
         except (ValueError, TypeError, json.JSONDecodeError) as exc:
             self.send_json(400, {"error": str(exc)})
             return
         updated_at = int(time.time() * 1000)
+        rejected = False
+        current = None
         with connect() as db:
-            db.execute("""
-                INSERT INTO progress
-                    (kind, work_id, episode_id, position, title, device_id, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(kind, work_id) DO UPDATE SET
-                    episode_id=excluded.episode_id,
-                    position=excluded.position,
-                    title=excluded.title,
-                    device_id=excluded.device_id,
-                    updated_at=excluded.updated_at,
-                    deleted=0
-            """, (kind, work_id, episode_id, position, title, device_id, updated_at))
-        self.send_json(200, {"ok": True, "updated_at": updated_at})
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT kind, work_id, episode_id, position, title, device_id, updated_at, deleted, revision "
+                "FROM progress WHERE kind=? AND work_id=?", (kind, work_id)
+            ).fetchone()
+            current = dict(row) if row else None
+            if current:
+                rejected = (expected != current["revision"] if expected is not None else
+                            current["deleted"] or current["episode_id"] != episode_id)
+                if not rejected:
+                    title = title or current["title"]
+                    if current["episode_id"] == episode_id and not current["deleted"] and not allow_rewind:
+                        position = max(position, current["position"])
+                    if (current["episode_id"] == episode_id and not current["deleted"] and
+                            position == current["position"] and title == current["title"]):
+                        updated_at = current["updated_at"]
+                        revision = current["revision"]
+                    else:
+                        revision = current["revision"] + 1
+                        db.execute("""
+                            UPDATE progress SET episode_id=?, position=?, title=?, device_id=?,
+                                updated_at=?, deleted=0, revision=? WHERE kind=? AND work_id=?
+                        """, (episode_id, position, title, device_id, updated_at, revision, kind, work_id))
+            elif expected not in (None, 0):
+                rejected = True
+            else:
+                revision = 1
+                db.execute("""
+                    INSERT INTO progress
+                        (kind, work_id, episode_id, position, title, device_id, updated_at, revision)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (kind, work_id, episode_id, position, title, device_id, updated_at, revision))
+        if rejected:
+            self.send_json(409, {"error": "stale progress", "progress": current})
+        else:
+            self.send_json(200, {"ok": True, "updated_at": updated_at, "revision": revision, "position": position})
 
     def do_DELETE(self):
         parsed = urlparse(self.path)
@@ -187,7 +230,8 @@ class Handler(BaseHTTPRequestHandler):
                 VALUES (?, ?, '', 0, '', '', ?, 1)
                 ON CONFLICT(kind, work_id) DO UPDATE SET
                     updated_at=excluded.updated_at,
-                    deleted=1
+                    deleted=1,
+                    revision=progress.revision+1
             """, (kind, work_id, updated_at))
         self.send_json(200, {"ok": True})
 

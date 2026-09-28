@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         뉴토끼 다크 리더 (본문 전용 뷰어)
 // @namespace    nt-dark-reader
-// @version      5.16
+// @version      5.17
 // @description  뉴토끼/toki31 소설·웹툰: 야간 다크/주간 종이색 본문 뷰어와 기기 간 읽기 위치 동기화
 // @homepageURL  https://github.com/yuisatomi/newtoki-dark-reader
 // @updateURL    https://raw.githubusercontent.com/yuisatomi/newtoki-dark-reader/main/newtoki-dark-reader.user.js
@@ -59,7 +59,9 @@
       timeout: 5000,
       onload: response => {
         if (response.status < 200 || response.status >= 300) {
-          reject(new Error('서버 응답 ' + response.status));
+          const error = new Error('서버 응답 ' + response.status);
+          error.status = response.status;
+          reject(error);
           return;
         }
         try { resolve(response.responseText ? JSON.parse(response.responseText) : {}); }
@@ -120,12 +122,14 @@
   const VIEW_FLAG = 'ntDarkReaderOn';
   const VIEW_FLAG_TS = 'ntDarkReaderOnTs';
   const SYNC_NAV_TARGET_KEY = 'ntReaderSyncNavTarget';
+  const SYNC_NAV_FROM_KEY = 'ntReaderSyncNavFrom';
 
   function rememberNavigationTarget(url) {
     try {
       const targetPath = new URL(url, location.href).pathname;
       const target = targetPath.match(/^\/(webtoon|novel)\/([A-Za-z0-9_-]+)\/([A-Za-z0-9_-]+)/);
       if (target) sessionStorage.setItem(SYNC_NAV_TARGET_KEY, target[1] + ':' + target[2] + ':' + target[3]);
+      sessionStorage.removeItem(SYNC_NAV_FROM_KEY);
     } catch (e) {}
   }
 
@@ -266,9 +270,9 @@
     const remoteByKey = new Map(result.progress.map(remote => [remote.kind + ':' + remote.work_id, remote]));
     const uploads = getReadLibrary().filter(record => {
       if (!['novel', 'webtoon'].includes(record?.kind) || !record.workId || !record.episodeId) return false;
+      if (episodeInfo && record.kind === episodeInfo.kind && record.workId === episodeInfo.workId) return false;
       const remote = remoteByKey.get(record.key);
-      if (remote?.deleted) return false;
-      return !remote || (record.updatedAt || 0) > (remote.updated_at || 0);
+      return !remote; // Existing server progress is authoritative, regardless of device clock.
     }).map(record => {
       let position = 0;
       try {
@@ -281,11 +285,14 @@
         episode_id: record.episodeId,
         position,
         title: record.workTitle || '',
-        device_id: getDeviceId()
+        device_id: getDeviceId(),
+        expected_revision: 0
       };
     });
     for (let i = 0; i < uploads.length; i += 4) {
-      await Promise.all(uploads.slice(i, i + 4).map(data => syncRequest('PUT', '/v1/progress', data)));
+      await Promise.all(uploads.slice(i, i + 4).map(data =>
+        syncRequest('PUT', '/v1/progress', data).catch(e => { if (e.status !== 409) throw e; })
+      ));
     }
     if (uploads.length) result = await syncRequest('GET', '/v1/progress');
     const records = getReadLibrary();
@@ -302,7 +309,6 @@
         return;
       }
       if (!remote.episode_id) return;
-      if (saved && (saved.updatedAt || 0) >= (remote.updated_at || 0)) return;
       if (saved) {
         saved.episodeId = remote.episode_id;
         saved.episodeNumber = '';
@@ -1051,32 +1057,64 @@
   let lastRemoteSave = 0;
   let syncReady = false;
   let restoreSequence = 0;
+  let remoteRevision = null;
+  let remoteEpisodeId = '';
+  let remoteWritable = false;
+  let remoteSaveChain = Promise.resolve();
 
   function currentRatio() {
     const max = document.documentElement.scrollHeight - window.innerHeight;
     return max > 0 ? Math.max(0, Math.min(1, window.scrollY / max)) : 0;
   }
-  function saveRemoteProgress(ratio) {
-    if (!episodeInfo || !getSyncToken()) return Promise.resolve();
-    lastRemoteSave = Date.now();
-    return syncRequest('PUT', '/v1/progress', {
-      kind: episodeInfo.kind,
-      work_id: episodeInfo.workId,
-      episode_id: episodeInfo.episodeId,
-      position: ratio,
-      title: titleText,
-      device_id: getDeviceId()
-    }).then(() => { syncStatus.textContent = '동기화됨'; })
-      .catch(e => {
-        syncStatus.textContent = '동기화 실패: ' + e.message;
-        throw e;
-      });
+  async function readRemoteProgress() {
+    const result = await syncRequest('GET', '/v1/progress?kind=' + episodeInfo.kind
+      + '&work_id=' + encodeURIComponent(episodeInfo.workId) + '&include_deleted=1');
+    if (!Number.isInteger(result.revision)) throw new Error('서버 업데이트 필요');
+    const remote = result.progress;
+    remoteRevision = result.revision;
+    remoteEpisodeId = remote && !remote.deleted ? remote.episode_id : '';
+    remoteWritable = !remote || (!remote.deleted && remoteEpisodeId === episodeInfo.episodeId);
+    return remote;
+  }
+  function saveRemoteProgress(ratio, transitionFrom = null) {
+    const save = async () => {
+      if (remoteRevision === null || (!remoteWritable && transitionFrom === null)) throw new Error('서버 기록 확인 필요');
+      if (remoteEpisodeId && remoteEpisodeId !== episodeInfo.episodeId
+        && transitionFrom !== '*' && transitionFrom !== remoteEpisodeId) throw new Error('다른 회차가 저장됨');
+      const data = {
+        kind: episodeInfo.kind, work_id: episodeInfo.workId, episode_id: episodeInfo.episodeId,
+        position: ratio, title: titleText, device_id: getDeviceId(),
+        allow_rewind: transitionFrom === '*'
+      };
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const result = await syncRequest('PUT', '/v1/progress', { ...data, expected_revision: remoteRevision });
+          remoteRevision = result.revision;
+          remoteEpisodeId = episodeInfo.episodeId;
+          remoteWritable = true;
+          lastRemoteSave = Date.now();
+          syncStatus.textContent = '동기화됨';
+          return;
+        } catch (e) {
+          if (e.status !== 409) throw e;
+          await readRemoteProgress();
+          if (attempt || transitionFrom === '*' || (remoteEpisodeId !== episodeInfo.episodeId
+            && remoteEpisodeId !== transitionFrom)) throw new Error('다른 기기의 최신 기록이 있습니다');
+        }
+      }
+    };
+    const pending = remoteSaveChain.then(save).catch(e => {
+      syncStatus.textContent = '동기화 보류: ' + e.message;
+      throw e;
+    });
+    remoteSaveChain = pending.catch(() => {});
+    return pending;
   }
   function saveProgress(immediate) {
     if (!scrollKey) return;
     const ratio = currentRatio();
     try { localStorage.setItem(scrollKey, String(ratio)); } catch (e) {}
-    if (!syncReady || !getSyncToken()) return;
+    if (!syncReady || !getSyncToken() || !remoteWritable) return;
     clearTimeout(remoteSaveTimer);
     if (immediate) { saveRemoteProgress(ratio).catch(() => {}); return; }
     const delay = Math.max(0, 5000 - (Date.now() - lastRemoteSave));
@@ -1093,11 +1131,19 @@
     manualSaveButton.disabled = true;
     manualSaveButton.innerHTML = '<span class="nt-ico">⏳</span><span class="nt-label"> 저장 중</span>';
     const remoteEnabled = !!getSyncToken();
-    const pending = remoteEnabled ? saveRemoteProgress(ratio) : Promise.resolve();
+    const pending = remoteEnabled ? readRemoteProgress().then(remote => {
+      if (remote && (remote.deleted || remote.episode_id !== episodeInfo.episodeId)
+        && !confirm('서버에 다른 회차의 기록이 있습니다. 현재 회차로 바꿀까요?')) {
+        throw new Error('서버 저장 취소');
+      }
+      return saveRemoteProgress(ratio, '*');
+    }) : Promise.resolve();
     pending.then(() => {
       manualSaveButton.innerHTML = '<span class="nt-ico">✓</span><span class="nt-label"> ' + (remoteEnabled ? '동기화됨' : '로컬 저장됨') + '</span>';
-    }).catch(() => {
-      manualSaveButton.innerHTML = '<span class="nt-ico">⚠</span><span class="nt-label"> 동기화 실패</span>';
+    }).catch(e => {
+      manualSaveButton.innerHTML = e.message === '서버 저장 취소'
+        ? '<span class="nt-ico">✓</span><span class="nt-label"> 로컬만 저장됨</span>'
+        : '<span class="nt-ico">⚠</span><span class="nt-label"> 동기화 실패</span>';
     }).finally(() => {
       setTimeout(() => {
         manualSaveButton.disabled = false;
@@ -1133,24 +1179,29 @@
   async function restoreProgress() {
     if (!scrollKey || !episodeInfo) { syncReady = true; return; }
     const sequence = ++restoreSequence;
+    syncReady = false;
+    remoteWritable = false;
+    remoteRevision = null;
     let ratio = NaN;
     try { ratio = parseFloat(localStorage.getItem(scrollKey)); } catch (e) {}
     const currentKey = episodeInfo.kind + ':' + episodeInfo.workId + ':' + episodeInfo.episodeId;
-    let intentionalNavigation = false;
+    let forwardFrom = '';
     try {
-      intentionalNavigation = sessionStorage.getItem(SYNC_NAV_TARGET_KEY) === currentKey;
-      if (intentionalNavigation) sessionStorage.removeItem(SYNC_NAV_TARGET_KEY);
+      if (sessionStorage.getItem(SYNC_NAV_TARGET_KEY) === currentKey) {
+        forwardFrom = sessionStorage.getItem(SYNC_NAV_FROM_KEY) || '';
+      }
+      sessionStorage.removeItem(SYNC_NAV_TARGET_KEY);
+      sessionStorage.removeItem(SYNC_NAV_FROM_KEY);
     } catch (e) {}
     if (getSyncToken()) {
       try {
-        const result = await syncRequest(
-          'GET',
-          '/v1/progress?kind=' + episodeInfo.kind + '&work_id=' + encodeURIComponent(episodeInfo.workId)
-        );
+        const remote = await readRemoteProgress();
         if (sequence !== restoreSequence) return;
         syncStatus.textContent = '연결됨';
-        const remote = result.progress;
-        if (remote && remote.episode_id !== episodeInfo.episodeId && !intentionalNavigation) {
+        if (remote && !remote.deleted && remote.episode_id !== episodeInfo.episodeId
+          && forwardFrom === remote.episode_id) {
+          await saveRemoteProgress(isFinite(ratio) ? ratio : 0, forwardFrom);
+        } else if (remote && !remote.deleted && remote.episode_id !== episodeInfo.episodeId) {
           const label = remote.title || ('회차 ' + remote.episode_id);
           if (confirm('다른 기기에서 읽던 위치가 있습니다.\n' + label + '\n\n이 회차로 이동할까요?')) {
             const target = '/' + episodeInfo.kind + '/' + episodeInfo.workId + '/' + remote.episode_id;
@@ -1163,11 +1214,11 @@
           ratio = Number(remote.position);
         }
       } catch (e) {
-        syncStatus.textContent = '오프라인: 로컬 위치 사용';
+        remoteWritable = false;
+        syncStatus.textContent = e.message === '서버 업데이트 필요' ? e.message : '동기화 보류: 로컬 위치 사용';
       }
     }
     syncReady = true;
-    if (intentionalNavigation) saveRemoteProgress(isFinite(ratio) ? ratio : 0).catch(() => {});
     if (!isFinite(ratio) || ratio <= 0) return;
     // 콘텐츠 높이 안정화를 대기하며 비율 위치로 이동 (최대 8초)
     const started = Date.now();
@@ -1195,6 +1246,9 @@
     saveProgress(true);
     navigating = true;
     rememberNavigationTarget(url);
+    if (episodeInfo && url === nextUrl) {
+      try { sessionStorage.setItem(SYNC_NAV_FROM_KEY, episodeInfo.episodeId); } catch (e) {}
+    }
     location.href = url;
   }
   /* 소설 좌우 탭 → 한 화면씩 이동, 웹툰 좌우 탭 → 이전/다음 화 */

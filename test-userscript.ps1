@@ -61,17 +61,21 @@ if (-not $source.Contains('doc.querySelector(''meta[name="description"]'')')) { 
 if (-not $source.Contains('metadataQueue = metadataQueue.then')) { throw 'Legacy metadata requests are not rate-limited.' }
 if (-not $source.Contains("manualSaveButton.addEventListener('click'")) { throw 'Manual progress save control is missing.' }
 if (-not $source.Contains("localStorage.setItem('ntRead:' + episodeInfo.kind")) { throw 'Manual save does not store the current episode.' }
-if (-not $source.Contains('remoteEnabled ? saveRemoteProgress(ratio)')) { throw 'Manual save does not sync the current position.' }
+if (-not $source.Contains("return saveRemoteProgress(ratio, '*');")) { throw 'Manual save does not explicitly replace remote progress.' }
 if (-not $source.Contains("syncRequest('GET', '/v1/progress')")) { throw 'Remote saved-work list is not loaded.' }
 if (-not $source.Contains("syncRequest('DELETE', '/v1/progress?kind='")) { throw 'Remote saved-work deletion is missing.' }
-if (-not $source.Contains("uploads.slice(i, i + 4).map(data => syncRequest('PUT', '/v1/progress', data))")) { throw 'Existing local read library is not uploaded.' }
+if (-not $source.Contains('expected_revision: 0')) { throw 'Missing local works are not uploaded conditionally.' }
+if (-not $source.Contains('return !remote; // Existing server progress is authoritative')) { throw 'Stale local works can overwrite server progress.' }
+if (-not $source.Contains('expected_revision: remoteRevision')) { throw 'Episode saves do not check server revision.' }
+if (-not $source.Contains("allow_rewind: transitionFrom === '*'")) { throw 'Explicit manual save cannot rewind within an episode.' }
+if (-not $source.Contains('if (!syncReady || !getSyncToken() || !remoteWritable) return;')) { throw 'Stale viewer tabs can auto-save over a newer episode.' }
+if (-not $source.Contains("sessionStorage.setItem(SYNC_NAV_FROM_KEY, episodeInfo.episodeId)")) { throw 'Forward episode navigation is not verified.' }
 if (-not $source.Contains('if (getSyncToken()) syncReadLibrary().catch(() => {});')) { throw 'Read libraries are not synchronized automatically.' }
 if (-not $source.Contains('readLibrarySyncPromise = mergeRemoteReadLibrary().finally')) { throw 'Concurrent read-library synchronization is not deduplicated.' }
 if (-not $source.Contains('if (remote.deleted)')) { throw 'Remote deletions are not applied locally.' }
-if (-not $source.Contains('if (remote?.deleted) return false;')) { throw 'Deleted works can be re-uploaded from another device.' }
 if (-not $source.Contains("localStorage.removeItem('ntRead:' + remote.kind")) { throw 'Remote deletions can be recreated from legacy storage.' }
 if (-not $source.Contains("error.textContent = '동기화 실패: ' + e.message")) { throw 'Library sync failures remain hidden.' }
-if (-not $source.Contains('manualSaveButton.innerHTML = ''<span class="nt-ico">⚠</span><span class="nt-label"> 동기화 실패</span>''')) { throw 'Manual remote-save failures remain hidden.' }
+if (-not $source.Contains('''<span class="nt-ico">⚠</span><span class="nt-label"> 동기화 실패</span>''')) { throw 'Manual remote-save failures remain hidden.' }
 $buildCall = $source.IndexOf('    buildViewer();')
 $readWrite = $source.IndexOf("localStorage.setItem('ntRead:")
 if ($buildCall -lt 0 -or $readWrite -lt $buildCall) { throw 'Episode is marked read before the viewer succeeds.' }

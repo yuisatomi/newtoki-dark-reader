@@ -21,12 +21,38 @@ try {
   $body = @{ kind='novel'; work_id='60853'; episode_id='6919020'; position=0.42; title='test'; device_id='mobile' } | ConvertTo-Json
   Invoke-RestMethod -Method Put -Uri "http://127.0.0.1:$testPort/v1/progress" -Headers $headers -ContentType 'application/json' -Body $body | Out-Null
   $list = Invoke-RestMethod -Uri "http://127.0.0.1:$testPort/v1/progress" -Headers $headers
-  if ($list.progress.Count -ne 1 -or $list.progress[0].episode_id -ne '6919020') { throw 'List endpoint failed.' }
+  if ($list.progress.Count -ne 1 -or $list.progress[0].episode_id -ne '6919020' -or $list.progress[0].revision -ne 1) { throw 'List endpoint or revision migration failed.' }
+  $advanced = @{ kind='novel'; work_id='60853'; episode_id='6919021'; position=0.75; expected_revision=1 } | ConvertTo-Json
+  $saved = Invoke-RestMethod -Method Put -Uri "http://127.0.0.1:$testPort/v1/progress" -Headers $headers -ContentType 'application/json' -Body $advanced
+  if ($saved.revision -ne 2) { throw 'Conditional episode advance failed.' }
+  foreach ($stale in @($body, (@{ kind='novel'; work_id='60853'; episode_id='6919020'; position=0.5; expected_revision=1 } | ConvertTo-Json))) {
+    try {
+      Invoke-RestMethod -Method Put -Uri "http://127.0.0.1:$testPort/v1/progress" -Headers $headers -ContentType 'application/json' -Body $stale | Out-Null
+      throw 'Stale episode write was accepted.'
+    } catch {
+      if ([int]$_.Exception.Response.StatusCode -ne 409) { throw }
+    }
+  }
+  $olderPosition = @{ kind='novel'; work_id='60853'; episode_id='6919021'; position=0.1 } | ConvertTo-Json
+  Invoke-RestMethod -Method Put -Uri "http://127.0.0.1:$testPort/v1/progress" -Headers $headers -ContentType 'application/json' -Body $olderPosition | Out-Null
+  $current = Invoke-RestMethod -Uri "http://127.0.0.1:$testPort/v1/progress?kind=novel&work_id=60853" -Headers $headers
+  if ($current.progress.episode_id -ne '6919021' -or $current.progress.position -ne 0.75 -or $current.revision -ne 2) { throw 'Legacy write regressed progress.' }
+  $manualRewind = @{ kind='novel'; work_id='60853'; episode_id='6919021'; position=0.2; expected_revision=2; allow_rewind=$true } | ConvertTo-Json
+  $rewound = Invoke-RestMethod -Method Put -Uri "http://127.0.0.1:$testPort/v1/progress" -Headers $headers -ContentType 'application/json' -Body $manualRewind
+  if ($rewound.position -ne 0.2 -or $rewound.revision -ne 3) { throw 'Explicit manual rewind failed.' }
   Invoke-RestMethod -Method Delete -Uri "http://127.0.0.1:$testPort/v1/progress?kind=novel&work_id=60853" -Headers $headers | Out-Null
   $deleted = Invoke-RestMethod -Uri "http://127.0.0.1:$testPort/v1/progress" -Headers $headers
-  if ($deleted.progress.Count -ne 1 -or -not $deleted.progress[0].deleted) { throw 'Delete tombstone was not retained.' }
+  if ($deleted.progress.Count -ne 1 -or -not $deleted.progress[0].deleted -or $deleted.progress[0].revision -ne 4) { throw 'Delete tombstone was not retained.' }
   $target = Invoke-RestMethod -Uri "http://127.0.0.1:$testPort/v1/progress?kind=novel&work_id=60853" -Headers $headers
   if ($null -ne $target.progress) { throw 'Deleted progress remains readable.' }
+  $tombstone = Invoke-RestMethod -Uri "http://127.0.0.1:$testPort/v1/progress?kind=novel&work_id=60853&include_deleted=1" -Headers $headers
+  if (-not $tombstone.progress.deleted -or $tombstone.revision -ne 4) { throw 'Deleted revision is unreadable to new clients.' }
+  try {
+    Invoke-RestMethod -Method Put -Uri "http://127.0.0.1:$testPort/v1/progress" -Headers $headers -ContentType 'application/json' -Body $body | Out-Null
+    throw 'Legacy client revived a deleted work.'
+  } catch {
+    if ([int]$_.Exception.Response.StatusCode -ne 409) { throw }
+  }
   Write-Host 'reader sync integration checks passed'
 } finally {
   if ($process -and -not $process.HasExited) { Stop-Process -Id $process.Id -Force }
