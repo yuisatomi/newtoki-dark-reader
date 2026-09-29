@@ -503,8 +503,13 @@ class ReaderAppTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             checked_url("https://127.0.0.1/novel/57458")
         with self.assertRaises(ValueError):
-            checked_url("https://toki31.com/novel/57458")
+            checked_url("https://toki33.com.evil.example/novel/57458")
         self.assertEqual(checked_url("https://toki32.com/novel/57458"), ("toki32.com", "57458", None))
+        self.assertEqual(checked_url("https://toki33.com/novel/57458/2"), ("toki33.com", "57458", "2"))
+        for url in ('https://toki33.com:0/novel/57458', 'https://toki33.com:bad/novel/57458',
+                    'https://user@toki33.com/novel/57458', 'http://toki33.com/novel/57458'):
+            with self.assertRaises(ValueError):
+                checked_url(url)
         source = Request("https://newtoki1.org/novel/57458")
         redirect = reader_crawl.SameSiteRedirect("57458")
         self.assertEqual(redirect.redirect_request(
@@ -512,6 +517,90 @@ class ReaderAppTest(unittest.TestCase):
             "https://toki32.com/novel/57458")
         with self.assertRaises(ValueError):
             redirect.redirect_request(source, None, 302, "Found", {}, "https://example.com/novel/57458")
+
+    def test_register_and_change_source_preserves_data(self):
+        register = '/app/api/manage/sources'
+        source = '/app/api/work/999/source'
+        self.assertEqual(self.request(register, {'host':'toki33.com'}, cookie=False)[0], 401)
+        self.login()
+        self.assertEqual(self.request(register, {'host':'toki33.com'}, app_header=False)[0], 403)
+        for host in (None, [], 'localhost', '127.0.0.1', 'https://toki33.com',
+                     'toki33.com:443', 'toki33.com/', 'toki33.com.evil.example', 'example.com'):
+            self.assertEqual(self.request(register, {'host':host})[0], 400)
+            self.assertEqual(self.request(source, {'host':host})[0], 400)
+        for _ in range(2):
+            self.assertEqual(self.request(register, {'host':' TOKI33.COM '})[1]['host'], 'toki33.com')
+        reader_sync.init_db()
+        self.assertIn('toki33.com', self.request('/app/api/manage')[1]['sources'])
+        self.assertEqual(self.request(source, {'host':'newtoki1.org'})[0], 200)
+        reader_app.collect_episode_list = lambda *_: ('시험 작품', [
+            ('91','91화','https://newtoki1.org/novel/999/91'),
+            ('92','92화','https://newtoki1.org/novel/999/92')])
+        reader_app.run_one_job(reader_sync.connect)
+        with reader_sync.connect() as db:
+            db.execute("UPDATE reader_episodes SET state='ready',paragraphs_json='[\"cached\"]' WHERE episode_id='91'")
+            reader_app.enqueue(db, '999', '92')
+            db.execute("UPDATE reader_jobs SET state='verification',error='old check' WHERE episode_id='92'")
+            db.execute("INSERT INTO reader_paused_sources VALUES('newtoki1.org','old check')")
+            reader_app.save_settings(db, '999', {'paused':1,'prefetch':4,'cache_limit_mb':8})
+        before = self.request('/app/api/manage/backup?work_id=999')[1]
+        progress = self.request('/app/api/work/999')[1]['progress']
+        self.assertEqual(self.request(source, {'host':'toki33.com'})[0], 200)
+        after = self.request('/app/api/manage/backup?work_id=999')[1]
+        self.assertEqual(after['work']['title'], before['work']['title'])
+        self.assertEqual(after['settings'], before['settings'])
+        self.assertEqual(after['progress'], before['progress'])
+        self.assertEqual(self.request('/app/api/work/999')[1]['progress'], progress)
+        for old, new in zip(before['episodes'], after['episodes']):
+            self.assertEqual(new['source_url'], old['source_url'].replace('newtoki1.org','toki33.com'))
+            self.assertEqual(new['paragraphs'], old['paragraphs'])
+        with reader_sync.connect() as db:
+            jobs = [tuple(r) for r in db.execute("SELECT * FROM reader_jobs WHERE work_id='999' ORDER BY episode_id")]
+            self.assertEqual([r[1:4] for r in jobs], [('', 'queued', 0), ('92','queued',0)])
+            self.assertEqual(db.execute('SELECT host FROM reader_paused_sources').fetchone()[0], 'newtoki1.org')
+        self.assertFalse(reader_app.run_one_job(reader_sync.connect), 'Keep the work paused')
+        self.assertEqual(self.request(source, {'host':'toki33.com'})[0], 200)
+        with reader_sync.connect() as db:
+            self.assertEqual([tuple(r) for r in db.execute("SELECT * FROM reader_jobs WHERE work_id='999' ORDER BY episode_id")], jobs)
+        self.assertEqual(self.request('/app/api/manage/restore', {'backup':after,'confirm':True})[0], 200)
+        self.assertEqual(self.request('/app/api/manage/backup?work_id=999')[1]['episodes'], after['episodes'])
+        # URL-based re-add uses the same source-change path, including cached episode URLs.
+        self.assertEqual(self.request('/app/api/works', {'url':'https://newtoki2.org/novel/999'})[0], 200)
+        self.assertEqual(self.request('/app/api/manage/backup?work_id=999')[1]['episodes'][0]['source_url'], 'https://newtoki2.org/novel/999/91')
+        # A newly added work does not need a saved reading position to switch sources.
+        self.request('/app/api/works', {'url':'https://toki32.com/novel/888'})
+        self.assertEqual(self.request('/app/api/work/888/source', {'host':'toki33.com'})[0], 200)
+        self.assertIn('toki33.com', self.request('/app/api/work/888')[1]['sources'])
+        self.assertEqual(self.request('/app/api/work/777/source', {'host':'toki33.com'})[0], 404)
+
+    def test_source_change_discards_inflight_results(self):
+        self.login()
+        for body_job in (False, True):
+            for failure in (None, RuntimeError, reader_crawl.HumanVerificationRequired, LockedChapter):
+                with self.subTest(body=body_job, failure=failure):
+                    self.request('/app/api/work/999/source', {'host':'toki32.com'})
+                    with reader_sync.connect() as db:
+                        db.execute("DELETE FROM reader_jobs WHERE work_id='999'")
+                        db.execute("INSERT OR REPLACE INTO reader_episodes(work_id,episode_id,ordinal,title,source_url,updated_at) VALUES('999','91',1,'91화','https://toki32.com/novel/999/91',1)")
+                        reader_app.enqueue(db, '999', '91' if body_job else '')
+                    def fetched(*_):
+                        self.assertEqual(self.request('/app/api/work/999/source', {'host':'toki33.com'})[0], 200)
+                        if failure:
+                            raise failure('old source result')
+                        return ['stale body'] if body_job else ('stale title', [('91','stale','https://toki32.com/novel/999/91')])
+                    reader_app.collect_episode_list = fetched
+                    reader_app.browse_episode = fetched
+                    self.assertTrue(reader_app.run_one_job(reader_sync.connect))
+                    with reader_sync.connect() as db:
+                        work = db.execute("SELECT * FROM reader_works WHERE work_id='999'").fetchone()
+                        self.assertEqual(work['host'], 'toki33.com')
+                        self.assertNotEqual(work['title'], 'stale title')
+                        episode = db.execute("SELECT * FROM reader_episodes WHERE work_id='999'").fetchone()
+                        self.assertEqual(episode['source_url'], 'https://toki33.com/novel/999/91')
+                        self.assertIsNone(episode['paragraphs_json'])
+                        self.assertEqual(episode['state'], 'missing')
+                        self.assertEqual(db.execute('SELECT count(*) FROM reader_paused_sources').fetchone()[0], 0)
+                        self.assertTrue(all(r['state']=='queued' and r['attempts']==0 for r in db.execute('SELECT * FROM reader_jobs')))
 
     def test_readd_deleted_work(self):
         self.login()
@@ -683,6 +772,9 @@ class ReaderAppTest(unittest.TestCase):
                     self.assertGreater(len(paragraphs[0]), 80)
                     self.assertEqual(len(seen), 2)
                     self.assertTrue(all("reader-test-approved=yes" in cookie for cookie in seen))
+                    parser, _ = reader_crawl.fetch_index_page("https://toki33.com/novel/11", "11", browser)
+                    self.assertEqual(parser.links, [("1", "1화"), ("0", "0화")])
+                    self.assertGreater(len(reader_crawl.extract_episode(browser, "https://toki33.com/novel/11/1", "11", "1")[0]), 80)
                     context.unroute("**/*")
                     browser.close()  # Only the test owner closes its dedicated browser.
         finally:
@@ -793,7 +885,8 @@ class ReaderAppTest(unittest.TestCase):
                             self.assertEqual(progress(),before,'Unsafe remote progress must be preserved')
                             self.assertEqual(writes,[409])
                             if case=='server-ahead':
-                                page.locator('#show-nav').click()
+                                page.evaluate('scrollBy(0,-30)')
+                                expect(page.locator('#reader-nav')).to_be_visible()
                                 page.once('dialog',lambda dialog: dialog.accept())
                                 page.locator('#manual-save').click()
                                 expect(page.locator('#save-feedback')).to_contain_text('서버에 저장했습니다')
@@ -957,7 +1050,7 @@ class ReaderAppTest(unittest.TestCase):
                     direct.wait_for_function('y => scrollY > y', arg=start)
                     self.assertAlmostEqual(direct.evaluate('scrollY'), start+step, delta=2)
                     expect(direct.locator('#reader-nav')).to_be_hidden()
-                    expect(direct.locator('#show-nav')).to_be_visible()
+                    expect(direct.locator('#show-nav, #hide-nav')).to_have_count(0)
                     direct.mouse.click(8, 300)
                     self.assertAlmostEqual(direct.evaluate('scrollY'), start, delta=2)
                     expect(direct.locator('#reader-nav')).to_be_visible()
@@ -972,10 +1065,6 @@ class ReaderAppTest(unittest.TestCase):
                     direct.mouse.click(8,300)
                     self.assertAlmostEqual(direct.evaluate('scrollY'), start, delta=2)
                     direct.locator('#close-settings').click()
-                    direct.locator('#hide-nav').click()
-                    expect(direct.locator('#reader-nav')).to_be_hidden()
-                    direct.locator('#show-nav').click()
-                    expect(direct.locator('#reader-nav')).to_be_visible()
                     direct.evaluate('getSelection().removeAllRanges()')
                     self.assertEqual(direct.evaluate('document.documentElement.scrollWidth<=innerWidth'), True)
                 direct.set_viewport_size({'width':390, 'height':800})
@@ -984,7 +1073,8 @@ class ReaderAppTest(unittest.TestCase):
                 direct.touchscreen.tap(382,300)
                 direct.wait_for_function('y => scrollY>y',arg=start)
                 expect(direct.locator('#reader-nav')).to_be_hidden()
-                direct.locator('#show-nav').click()
+                direct.evaluate('scrollBy(0,-30)')
+                expect(direct.locator('#reader-nav')).to_be_visible()
                 direct.wait_for_timeout(850)  # Finish scroll autosaves before the manual-save probe.
                 pending_saves=[]
                 direct.route('**/app/api/progress', lambda route: pending_saves.append(route))
@@ -1153,6 +1243,23 @@ class ReaderAppTest(unittest.TestCase):
                 expect(card.get_by_role('button',name='수집 재개',exact=True)).to_be_visible()
                 card.get_by_role('button',name='수집 재개',exact=True).click()
                 expect(card.get_by_role('button',name='수집 일시정지',exact=True)).to_be_visible()
+                direct.locator('#source-add-host').fill('toki33.com')
+                direct.locator('#source-add-form button').click()
+                expect(direct.locator('#manage-message')).to_contain_text('toki33.com 등록 완료')
+                card.get_by_label('수집 도메인',exact=True).select_option('toki33.com')
+                direct.once('dialog',lambda dialog: dialog.dismiss())
+                card.get_by_role('button',name='도메인 변경',exact=True).click()
+                direct.reload()
+                expect(card.get_by_label('수집 도메인',exact=True)).to_have_value('newtoki1.org')
+                card.get_by_label('수집 도메인',exact=True).select_option('toki33.com')
+                direct.once('dialog',lambda dialog: dialog.accept())
+                card.get_by_role('button',name='도메인 변경',exact=True).click()
+                expect(direct.locator('#manage-message')).to_contain_text('toki33.com로 변경했습니다.')
+                expect(card).to_contain_text('본문 저장 3개')
+                expect(card).to_contain_text('읽은 위치:')
+                direct.reload()
+                expect(card.get_by_label('수집 도메인',exact=True)).to_have_value('toki33.com')
+                expect(card.get_by_role('button',name='도메인 변경',exact=True)).to_be_disabled()
                 for width in (390,1280):
                     direct.set_viewport_size({'width':width,'height':800})
                     self.assertTrue(direct.evaluate('document.documentElement.scrollWidth<=innerWidth'))

@@ -21,6 +21,19 @@ EPISODE_PATH = re.compile(r"^/novel/([0-9]+)/([0-9]+)$")
 WORK_PATH = re.compile(r"^/novel/([0-9]+)(?:/([0-9]+))?/?$")
 
 
+def supported_host(host):
+    return isinstance(host, str) and re.fullmatch(r'(?:newtoki[0-9]{1,6}\.org|toki[0-9]{1,6}\.com)', host) is not None
+
+
+def checked_host(value):
+    if not isinstance(value, str):
+        raise ValueError('수집 도메인을 입력하세요.')
+    host = value.strip().lower()
+    if not supported_host(host):
+        raise ValueError('newtoki숫자.org 또는 toki숫자.com 형식의 도메인만 입력하세요. URL·포트·내부 주소는 사용할 수 없습니다.')
+    return host
+
+
 class CrawlUnavailable(Exception):
     pass
 
@@ -74,8 +87,13 @@ def source_page(browser, url, work_id):
     page = page or context.new_page()
     def restrict_request(route):
         request = route.request
-        parsed = urlparse(request.url)
-        if parsed.scheme != "https" or parsed.hostname not in HOSTS | {"challenges.cloudflare.com", "toki.peertrk.com"}:
+        try:
+            parsed = urlparse(request.url)
+            allowed = (parsed.scheme == "https" and parsed.port is None and not (parsed.username or parsed.password)
+                       and (supported_host(parsed.hostname) or parsed.hostname in {"challenges.cloudflare.com", "toki.peertrk.com"}))
+        except ValueError:
+            allowed = False
+        if not allowed:
             route.abort()
             return
         if request.is_navigation_request() and request.frame == page.main_frame:
@@ -111,7 +129,7 @@ def check_browser_response(response, page):
 def checked_url(url, work_id=None):
     parsed = urlparse(url)
     match = WORK_PATH.fullmatch(parsed.path)
-    if (parsed.scheme != "https" or parsed.hostname not in HOSTS or parsed.port
+    if (parsed.scheme != "https" or not supported_host(parsed.hostname) or parsed.port is not None
             or parsed.username or parsed.password or not match):
         raise ValueError("허용된 소설 주소만 입력하세요.")
     if work_id and match.group(1) != work_id:

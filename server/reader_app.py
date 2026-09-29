@@ -14,7 +14,7 @@ from urllib.parse import parse_qs, urlparse
 import reader_auth
 
 from reader_crawl import (CrawlUnavailable, HumanVerificationRequired, LockedChapter,
-                          checked_url, collect_episode_list, extract_episode, source_browser)
+                          HOSTS, checked_host, supported_host, checked_url, collect_episode_list, extract_episode, source_browser)
 
 
 HTML_PATH = Path(__file__).with_name("reader_app.html")
@@ -91,6 +91,7 @@ def init_db(connect):
     reader_auth.init_db(connect)
     with connect() as db:
         db.execute("CREATE TABLE IF NOT EXISTS reader_paused_sources (host TEXT PRIMARY KEY, error TEXT NOT NULL)")
+        db.execute('CREATE TABLE IF NOT EXISTS reader_sources (host TEXT PRIMARY KEY)')
         db.execute("""CREATE TABLE IF NOT EXISTS reader_work_settings (
             work_id TEXT PRIMARY KEY, paused INTEGER NOT NULL DEFAULT 0,
             prefetch INTEGER NOT NULL DEFAULT 2, cache_limit_mb INTEGER NOT NULL DEFAULT 0
@@ -173,6 +174,33 @@ def queue_prefetch(db, work_id, episode_id):
             enqueue(db, work_id, row["episode_id"])
 
 
+def set_work_source(db, work_id, host):
+    """Caller holds a write transaction; discard results from the previous source."""
+    previous = db.execute('SELECT host FROM reader_works WHERE work_id=?', (work_id,)).fetchone()
+    db.execute('INSERT OR IGNORE INTO reader_sources(host) VALUES(?)', (host,))
+    changed = previous is None or previous['host'] != host
+    now = int(time.time() * 1000)
+    db.execute('''INSERT INTO reader_works(work_id,host,title,updated_at) VALUES(?,?,?,?)
+        ON CONFLICT(work_id) DO UPDATE SET host=excluded.host,updated_at=excluded.updated_at''',
+               (work_id, host, f'소설 {work_id}', now))
+    if changed:
+        pending = db.execute("""SELECT j.episode_id FROM reader_jobs j JOIN reader_episodes e
+            ON e.work_id=j.work_id AND e.episode_id=j.episode_id
+            WHERE j.work_id=? AND e.state!='ready'""", (work_id,)).fetchall()
+        db.execute('DELETE FROM reader_jobs WHERE work_id=?', (work_id,))
+        db.execute("""UPDATE reader_episodes SET source_url=?||episode_id,
+            state=CASE WHEN state='ready' THEN state ELSE 'missing' END,error=''
+            WHERE work_id=?""", (f'https://{host}/novel/{work_id}/', work_id))
+        enqueue(db, work_id, force=True)
+        for row in pending:
+            enqueue(db, work_id, row['episode_id'])
+
+
+def source_hosts(db):
+    rows = db.execute("SELECT host FROM reader_sources UNION SELECT host FROM reader_works WHERE host!=''")
+    return sorted(HOSTS | {row[0] for row in rows if supported_host(row[0])})
+
+
 def work_settings(db, work_id):
     row = db.execute('SELECT paused,prefetch,cache_limit_mb FROM reader_work_settings WHERE work_id=?', (work_id,)).fetchone()
     return dict(row) if row else {'paused': 0, 'prefetch': 2, 'cache_limit_mb': 0}
@@ -230,7 +258,7 @@ def checked_backup(data):
         raise ValueError('작품 ID가 올바르지 않습니다.')
     work_id = work['work_id']
     host = work.get('host')
-    if host not in ('', 'newtoki1.org', 'toki32.com'):
+    if host != '' and not supported_host(host):
         raise ValueError('지원하지 않는 작품 출처입니다.')
     def title(value):
         if not isinstance(value, str) or len(value) > 2000:
@@ -346,7 +374,7 @@ def handle_get(handler, connect, token):
                 LEFT JOIN cache c ON c.work_id=k.work_id LEFT JOIN jobs j ON j.work_id=k.work_id
                 LEFT JOIN reader_work_settings s ON s.work_id=k.work_id
                 ORDER BY title,k.work_id""").fetchall()
-            respond(handler, 200, {'works': [dict(row) for row in rows]})
+            respond(handler, 200, {'works': [dict(row) for row in rows], 'sources': source_hosts(db)})
             return
         if path == '/app/api/devices':
             rows = db.execute('''SELECT id,kind,name,created_at,last_seen,expires_at FROM reader_credentials
@@ -383,6 +411,7 @@ def handle_get(handler, connect, token):
             episodes = db.execute("SELECT episode_id,ordinal,title,state,error FROM reader_episodes WHERE work_id=? ORDER BY ordinal", (work_id,)).fetchall()
             job = db.execute("SELECT state,error FROM reader_jobs WHERE work_id=? AND episode_id=''", (work_id,)).fetchone()
             respond(handler, 200, {"work": dict(work) if work else None,
+                                   "sources": source_hosts(db),
                                    "progress": dict(progress) if progress else None,
                                    "episodes": [dict(row) for row in episodes],
                                    "list_job": dict(job) if job else None,
@@ -437,6 +466,16 @@ def handle_post(handler, connect, token, store_progress, delete_progress):
     if managed is not None:
         status, payload, cookie = managed
         respond(handler, status, payload, cookie)
+        return
+    if path == '/app/api/manage/sources':
+        try:
+            host = checked_host(data.get('host'))
+        except ValueError as exc:
+            respond(handler, 400, {'error': str(exc)})
+            return
+        with connect() as db:
+            db.execute('INSERT OR IGNORE INTO reader_sources(host) VALUES(?)', (host,))
+        respond(handler, 200, {'ok': True, 'host': host})
         return
     if path == '/app/api/manage/restore':
         try:
@@ -537,33 +576,30 @@ def handle_post(handler, connect, token, store_progress, delete_progress):
             respond(handler, 400, {"error": str(exc)})
             return
         with connect() as db:
+            db.execute('BEGIN IMMEDIATE')
             now = int(time.time() * 1000)
             db.execute("""UPDATE progress SET deleted=0,revision=revision+1,updated_at=?
                 WHERE kind='novel' AND work_id=? AND deleted=1""", (now, work_id))
-            db.execute("""
-                INSERT INTO reader_works(work_id,host,title,updated_at) VALUES(?,?,?,?)
-                ON CONFLICT(work_id) DO UPDATE SET host=excluded.host,updated_at=excluded.updated_at
-            """, (work_id, host, f"소설 {work_id}", now))
+            set_work_source(db, work_id, host)
             enqueue(db, work_id, force=True)
         respond(handler, 200, {"work_id": work_id, "episode_id": episode_id})
         return
     match = SOURCE_PATH.fullmatch(path)
     if match:
         work_id = match.group(1)
-        host = data.get("host")
-        if host not in ("newtoki1.org", "toki32.com"):
-            respond(handler, 400, {"error": "지원하는 출처를 선택하세요."})
+        try:
+            host = checked_host(data.get('host'))
+        except ValueError as exc:
+            respond(handler, 400, {"error": str(exc)})
             return
         with connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            work = db.execute('SELECT 1 FROM reader_works WHERE work_id=?', (work_id,)).fetchone()
             progress = db.execute("SELECT 1 FROM progress WHERE kind='novel' AND work_id=? AND deleted=0", (work_id,)).fetchone()
-            if not progress:
+            if not work and not progress:
                 respond(handler, 404, {"error": "저장된 작품이 아닙니다."})
                 return
-            db.execute("""
-                INSERT INTO reader_works(work_id,host,title,updated_at) VALUES(?,?,?,?)
-                ON CONFLICT(work_id) DO UPDATE SET host=excluded.host,updated_at=excluded.updated_at
-            """, (work_id, host, f"소설 {work_id}", int(time.time() * 1000)))
-            enqueue(db, work_id, force=True)
+            set_work_source(db, work_id, host)
         respond(handler, 200, {"ok": True})
         return
     match = RESUME_PATH.fullmatch(path)
