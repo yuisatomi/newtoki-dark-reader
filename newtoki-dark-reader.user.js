@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         뉴토끼 다크 리더 (본문 전용 뷰어)
 // @namespace    nt-dark-reader
-// @version      5.17
+// @version      5.18
 // @description  뉴토끼/toki31 소설·웹툰: 야간 다크/주간 종이색 본문 뷰어와 기기 간 읽기 위치 동기화
 // @homepageURL  https://github.com/yuisatomi/newtoki-dark-reader
 // @updateURL    https://raw.githubusercontent.com/yuisatomi/newtoki-dark-reader/main/newtoki-dark-reader.user.js
@@ -27,11 +27,12 @@
   const READER_CFG_KEY = 'ntDarkReaderCfg';
   const SYNC_URL = 'https://reader-sync.flolim.com';
   const SYNC_TOKEN_KEY = 'ntReaderSyncToken';
+  const DEVICE_TOKEN_KEY = 'ntReaderDeviceToken';
   const DEVICE_ID_KEY = 'ntReaderDeviceId';
   const READ_LIBRARY_KEY = 'ntReaderLibrary';
 
   function getSyncToken() {
-    try { return String(GM_getValue(SYNC_TOKEN_KEY, '') || '').trim(); } catch (e) { return ''; }
+    try { return String(GM_getValue(DEVICE_TOKEN_KEY, '') || GM_getValue(SYNC_TOKEN_KEY, '') || '').trim(); } catch (e) { return ''; }
   }
   function getDeviceId() {
     try {
@@ -48,18 +49,24 @@
   function syncRequest(method, route, data) {
     const token = getSyncToken();
     if (!token || typeof GM_xmlhttpRequest !== 'function') return Promise.reject(new Error('동기화 토큰 없음'));
+    return serverRequest(method, route, data, token);
+  }
+  function serverRequest(method, route, data, token = '') {
     return new Promise((resolve, reject) => GM_xmlhttpRequest({
       method,
       url: SYNC_URL + route,
       headers: {
-        Authorization: 'Bearer ' + token,
+        ...(token ? { Authorization: 'Bearer ' + token } : {}),
         ...(data ? { 'Content-Type': 'application/json' } : {})
       },
       data: data ? JSON.stringify(data) : undefined,
       timeout: 5000,
       onload: response => {
         if (response.status < 200 || response.status >= 300) {
-          const error = new Error('서버 응답 ' + response.status);
+          let message = '서버 응답 ' + response.status;
+          try { message = JSON.parse(response.responseText).error || message; } catch (_) {}
+          if(response.status === 401 && token) message = '연결이 해제되었거나 만료되었습니다. 계정을 다시 연결하세요.';
+          const error = new Error(message);
           error.status = response.status;
           reject(error);
           return;
@@ -70,6 +77,53 @@
       onerror: () => reject(new Error('서버 연결 실패')),
       ontimeout: () => reject(new Error('서버 연결 시간 초과'))
     }));
+  }
+
+  let connectionDialog = null;
+  function connectAccount(onConnected) {
+    if(connectionDialog) return;
+    const name = prompt('이 기기의 이름을 입력하세요.', navigator.platform + ' 브라우저');
+    if(!name || !name.trim()) return;
+    if(name.trim().length > 80) {alert('기기 이름은 80자 이내로 입력하세요.');return;}
+    const box = document.createElement('div');
+    box.id = 'nt-account-connect'; connectionDialog = box;
+    box.style.cssText = 'position:fixed;inset:15% 12px auto;max-width:440px;margin:auto;padding:24px;border:1px solid #59636f;border-radius:12px;background:#161b22;color:#e6edf3;z-index:2147483647;font:16px/1.7 sans-serif;box-shadow:0 8px 40px #0009';
+    const title=document.createElement('strong');title.textContent='계정 연결';
+    const status=document.createElement('p');status.textContent='연결 요청 중…';
+    const code=document.createElement('strong');code.style.cssText='display:block;font-size:24px;letter-spacing:3px';
+    const link=document.createElement('a');link.textContent='로그인하고 이 기기 승인';link.style.color='#79b8ff';link.target='_blank';link.rel='noopener noreferrer';link.hidden=true;
+    const close=document.createElement('button');close.textContent='닫기';close.style.cssText='display:block;margin-top:16px;padding:8px 16px';
+    box.append(title,status,code,link,close);document.body.append(box);
+    let cancelled=false, timer=null;
+    close.onclick=()=>{cancelled=true;clearTimeout(timer);box.remove();connectionDialog=null;};
+    serverRequest('POST','/v1/auth/device/start',{name:name.trim()}).then(request=>{
+      if(cancelled)return;
+      code.textContent=request.user_code;link.href=SYNC_URL+'/app#connect='+encodeURIComponent(request.user_code);link.hidden=false;
+      status.textContent='아래 링크에서 로그인 후 이 코드를 확인하고 승인하세요. 다른 기기에 링크를 입력해 승인해도 됩니다. 10분 안에 완료하세요.';
+      const deadline=Date.now()+request.expires_in*1000;
+      const poll=async()=>{
+        if(cancelled)return;
+        if(Date.now()>=deadline){status.textContent='연결 시간이 만료되었습니다. 닫고 다시 시도하세요.';return;}
+        try {
+          const result=await serverRequest('POST','/v1/auth/device/poll',{device_code:request.device_code});
+          if(cancelled)return;
+          if(result.status==='approved') {
+            GM_setValue(DEVICE_TOKEN_KEY,result.token);
+            // Do not retain a fallback shared secret after switching this installation.
+            GM_setValue(SYNC_TOKEN_KEY,'');
+            status.textContent='연결되었습니다. 이 기기는 자동으로 동기화됩니다.';link.hidden=true;code.textContent='';
+            syncReadLibrary().catch(()=>{});
+            if(onConnected)onConnected();
+            return;
+          }
+        }catch(error){
+          if(error.status && error.status!==429){status.textContent=error.message;return;}
+          status.textContent='연결 확인 중입니다. 네트워크 복구 후 자동으로 다시 확인합니다.';
+        }
+        if(!cancelled)timer=setTimeout(poll,5000);
+      };
+      timer=setTimeout(poll,5000);
+    }).catch(error=>{if(!cancelled)status.textContent=error.message;});
   }
 
   function getUserDomains() {
@@ -107,6 +161,9 @@
     });
   }
   if (!hostMatches(location.hostname)) return;   // 대상 사이트가 아니면 종료
+  if(typeof GM_registerMenuCommand === 'function') {
+    GM_registerMenuCommand('🔗 동기화 계정 연결',()=>connectAccount());
+  }
 
   /* ============================================================ */
 
@@ -984,11 +1041,14 @@
     <div class="row sync">
       <label>읽기 위치 동기화</label>
       <small>${SYNC_URL}</small>
+      <div class="sync-actions"><button type="button" id="nt-sync-connect">계정 연결</button><button type="button" id="nt-sync-devices">기기 관리</button></div>
+      <details><summary>이전 공통 토큰 사용</summary>
       <input type="password" id="nt-sync-token" autocomplete="off" placeholder="공통 토큰 입력">
       <div class="sync-actions">
         <button type="button" id="nt-sync-save">저장·확인</button>
-        <button type="button" id="nt-sync-clear">삭제</button>
       </div>
+      </details>
+      <button type="button" id="nt-sync-clear">이 기기 동기화 끄기</button>
       <div id="nt-sync-status"></div>
     </div>
     <div class="btns"><button id="nt-reset">기본값</button><button id="nt-close">닫기</button></div>
@@ -1025,17 +1085,21 @@
   panel.querySelector('#nt-close').addEventListener('click', () => panel.classList.remove('open'));
   const syncTokenInput = panel.querySelector('#nt-sync-token');
   const syncStatus = panel.querySelector('#nt-sync-status');
-  syncStatus.textContent = getSyncToken() ? '토큰 설정됨' : '토큰을 입력하면 동기화를 시작합니다.';
+  syncStatus.textContent = getSyncToken() ? '동기화 연결 설정됨' : '계정 연결을 누르면 동기화를 시작합니다.';
+  panel.querySelector('#nt-sync-connect').addEventListener('click',()=>connectAccount(()=>restoreProgress()));
+  panel.querySelector('#nt-sync-devices').addEventListener('click',()=>window.open(SYNC_URL+'/app#devices','_blank','noopener,noreferrer'));
   panel.querySelector('#nt-sync-save').addEventListener('click', () => {
     const token = syncTokenInput.value.trim();
     if (!token) { syncStatus.textContent = '토큰을 입력하세요.'; return; }
     if (!episodeInfo) { syncStatus.textContent = '이 작품 주소는 동기화를 지원하지 않습니다.'; return; }
+    GM_setValue(DEVICE_TOKEN_KEY, '');
     GM_setValue(SYNC_TOKEN_KEY, token);
     syncTokenInput.value = '';
     syncStatus.textContent = '연결 확인 중…';
     restoreProgress();
   });
   panel.querySelector('#nt-sync-clear').addEventListener('click', () => {
+    GM_setValue(DEVICE_TOKEN_KEY, '');
     GM_setValue(SYNC_TOKEN_KEY, '');
     syncTokenInput.value = '';
     syncStatus.textContent = '동기화 꺼짐';
