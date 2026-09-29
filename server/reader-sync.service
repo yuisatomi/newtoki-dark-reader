@@ -24,6 +24,8 @@ ProtectSystem=strict
 ProtectHome=true
 ProtectKernelTunables=true
 ProtectControlGroups=true
+# Preserve LXCFS memory counters inside the service's private mount namespace.
+BindReadOnlyPaths=/proc/meminfo
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 
 [Install]
