@@ -1,14 +1,19 @@
 [Unit]
 Description=Reading progress sync API
-After=network-online.target
-Wants=network-online.target
+After=network-online.target reader-browser.service
+Wants=network-online.target reader-browser.service
 
 [Service]
 Type=simple
 User=reader-sync
 Group=reader-sync
 EnvironmentFile=/etc/reader-sync.env
-ExecStart=/usr/bin/python3 /opt/reader-sync/reader_sync.py
+Environment=HOME=/var/lib/reader-sync
+Environment=XDG_CACHE_HOME=/var/lib/reader-sync/cache
+Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/reader-sync/browsers
+Environment=READER_BROWSER_CDP=http://127.0.0.1:9222
+Environment=READER_SOURCE_PROXY=http://127.0.0.1:8081
+ExecStart=/opt/reader-sync/venv/bin/python /opt/reader-sync/reader_sync.py
 Restart=on-failure
 RestartSec=2
 StateDirectory=reader-sync

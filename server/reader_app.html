@@ -1,0 +1,403 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>소설 읽기</title>
+<style>
+  :root { --bg:#0d1117; --text:#d7dde7; --title:#e6edf3; --surface:#161b22; --button:#21262d;
+    --border:#30363d; --muted:#8b949e; --accent:#58a6ff; --primary:#1f6feb; --width:720px;
+    --font:18px; --lh:2; color-scheme:dark; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font-family:'Noto Sans KR','Malgun Gothic',sans-serif; }
+  button,input,select { font:inherit; }
+  button,input,select { border:1px solid var(--border); border-radius:8px; background:var(--button); color:var(--title); }
+  button { padding:9px 13px; cursor:pointer; }
+  button:disabled { opacity:.45; cursor:default; }
+  button.primary { background:var(--primary); border-color:var(--primary); color:white; font-weight:700; }
+  input,select { padding:9px 11px; min-width:0; }
+  input[type=range] { padding:0; accent-color:var(--primary); width:100%; }
+  a { color:var(--accent); }
+  .shell { max-width:var(--width); margin:auto; padding:20px 18px 120px; }
+  header,.toolbar,.item,.controls { display:flex; align-items:center; gap:9px; flex-wrap:wrap; }
+  header { justify-content:space-between; border-bottom:1px solid var(--border); padding-bottom:12px; }
+  h1 { font-size:1.25rem; margin:0; color:var(--title); }
+  h2 { font-size:1.1rem; color:var(--title); }
+  .card { margin:18px 0; padding:16px; border:1px solid var(--border); border-radius:12px; background:var(--surface); }
+  .item { padding:12px 0; border-bottom:1px solid var(--border); justify-content:space-between; }
+  .item:last-child { border-bottom:0; }
+  .item div:first-child { min-width:0; flex:1; }
+  .item strong { display:block; color:var(--title); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .muted,.message { color:var(--muted); font-size:.85rem; }
+  .message { min-height:1.6em; }
+  .toolbar { margin:14px 0; }
+  .toolbar input { flex:1; }
+  .hidden { display:none !important; }
+  #episode-list { max-height:60vh; overflow:auto; }
+  #episode-list button { width:100%; text-align:left; margin:3px 0; }
+  #episode-list button.current { border-color:var(--primary); }
+  #reader { max-width:var(--width); margin:auto; padding:24px 20px 145px; }
+  #reader-title { font-size:calc(var(--font) * 1.25); border-bottom:1px solid var(--border); padding-bottom:14px; }
+  #content { font-size:var(--font); line-height:var(--lh); letter-spacing:.01em; word-break:break-word; overflow-wrap:break-word; }
+  #content p { margin:0 0 1.2em; }
+  #reader-nav { position:fixed; bottom:0; left:0; right:0; z-index:10; display:flex; flex-wrap:wrap;
+    justify-content:center; gap:8px; padding:8px 12px calc(8px + env(safe-area-inset-bottom));
+    background:var(--bg); border-top:1px solid var(--border); }
+  #settings { position:fixed; right:12px; bottom:75px; z-index:11; width:min(280px,calc(100vw - 24px));
+    padding:16px; border:1px solid var(--border); border-radius:12px; background:var(--surface); box-shadow:0 8px 28px #0006; }
+  #settings label { display:block; margin:10px 0; font-size:.83rem; color:var(--muted); }
+  #settings label span { float:right; }
+  #reader-nav button { flex:1 1 auto; max-width:130px; }
+  @media(max-width:600px) { #reader { padding:16px 17px 110px; } #reader-nav { gap:5px; } #reader-nav button { padding:9px 4px; font-size:.9rem; } }
+</style>
+</head>
+<body>
+<main class="shell hidden" id="login">
+  <h1>소설 읽기</h1>
+  <div class="card">
+    <p id="login-help">로그인 정보를 확인하는 중입니다.</p>
+    <form id="login-form" class="toolbar">
+      <input id="username" name="username" autocomplete="username" placeholder="아이디" aria-label="아이디" class="hidden">
+      <input id="password" name="password" type="password" autocomplete="current-password" placeholder="비밀번호" aria-label="비밀번호" class="hidden">
+      <input id="token" type="password" autocomplete="off" placeholder="최초 설정용 기존 토큰" aria-label="최초 설정용 기존 토큰" required>
+      <button class="primary">로그인</button></form>
+    <p class="message" id="login-message"></p>
+  </div>
+</main>
+<main class="shell hidden" id="home">
+  <header><h1>📚 소설 읽기</h1><div class="controls"><button id="account-open">계정·기기</button><button id="logout">로그아웃</button></div></header>
+  <section id="library">
+    <div class="toolbar"><input id="add-url" type="url" placeholder="소설 작품 또는 회차 URL"><button class="primary" id="add-work">작품 추가</button></div>
+    <p class="message" id="library-message"></p>
+    <div id="library-list" class="card"></div>
+  </section>
+  <section id="work" class="hidden">
+    <div class="toolbar"><button id="back-library">← 읽던 작품</button><button id="refresh-list">목록 새로고침</button></div>
+    <h2 id="work-title"></h2>
+    <div id="source-chooser" class="card hidden">출처를 선택하세요.
+      <select id="source"><option value="newtoki1.org">newtoki1.org</option><option value="toki32.com">toki32.com</option></select>
+      <button id="save-source">선택</button>
+    </div>
+    <p class="message" id="work-message"></p>
+    <div id="episode-list" class="card"></div>
+  </section>
+</main>
+<main class="shell hidden" id="account">
+  <header><h1>계정·연결된 기기</h1><button id="account-back">읽던 작품</button></header>
+  <p>한 소유자의 모든 기기가 같은 읽기 기록을 공유합니다.</p>
+  <details class="card" id="account-details">
+    <summary id="account-heading">소유자 계정 설정</summary>
+    <form id="account-form">
+      <p><label>아이디 <input id="account-username" autocomplete="username" required pattern="[A-Za-z0-9_.-]{3,64}" maxlength="64"></label></p>
+      <p id="current-password-row"><label>현재 비밀번호 <input id="current-password" type="password" autocomplete="current-password"></label></p>
+      <p><label>새 비밀번호 <input id="new-password" type="password" autocomplete="new-password" minlength="15" maxlength="256" required></label></p>
+      <p><label>새 비밀번호 확인 <input id="confirm-password" type="password" autocomplete="new-password" required></label></p>
+      <p class="muted">15자 이상. 변경하면 다른 브라우저와 연결된 스크립트는 다시 로그인·연결해야 합니다. 기존 공통 토큰은 호환용으로 유지됩니다.</p>
+      <button class="primary">계정 저장</button>
+    </form>
+    <p class="message" id="account-message"></p>
+  </details>
+  <section class="card" id="pair-panel">
+    <h2>새 기기 연결 승인</h2>
+    <p>본인이 연결을 시작한 기기만 승인하세요. 아래 코드가 해당 기기에 표시된 코드와 같은지 확인하세요.</p>
+    <form id="pair-form" class="toolbar"><input id="pair-code" placeholder="ABCD-EFGH" aria-label="기기 연결 코드" maxlength="9" required><button>요청 확인</button></form>
+    <p class="message" id="pair-message"></p>
+    <div id="pair-confirm" class="hidden"><p id="pair-name"></p><button id="pair-approve" class="primary">코드 확인 · 연결 승인</button> <button id="pair-deny">거절</button></div>
+  </section>
+  <section class="card"><h2>연결된 기기</h2><button id="devices-refresh">새로고침</button><div id="device-list"></div></section>
+</main>
+<article id="reader" class="hidden">
+  <h1 id="reader-title"></h1>
+  <p class="message" id="reader-message"></p>
+  <div id="content"></div>
+  <div id="reader-nav">
+    <button id="previous">◀ 이전화</button><button id="next" class="primary">다음화 ▶</button>
+    <button id="show-list">☰ 목록</button><button id="manual-save">💾 저장</button><button id="show-settings">⚙ 설정</button>
+  </div>
+</article>
+<aside id="settings" class="hidden">
+  <div class="controls"><button data-theme="dark">☾ 야간 다크</button><button data-theme="paper">☀ 주간 종이색</button></div>
+  <label>글자 크기 <span id="font-value"></span><input id="font" type="range" min="12" max="32"></label>
+  <label>본문 너비 <span id="width-value"></span><input id="width" type="range" min="360" max="1400" step="10"></label>
+  <label>줄 간격 <span id="lh-value"></span><input id="lh" type="range" min="1.4" max="3" step="0.1"></label>
+  <label>따뜻한 색감 <span id="warm-value"></span><input id="warm" type="range" min="0" max="100"></label>
+  <button id="close-settings">닫기</button>
+  <button id="reader-account">계정·기기</button>
+</aside>
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const state = { workId:'', episodeId:'', work:null, remote:null, writable:false, reading:false, transitionFrom:'', poll:null, save:null, saving:Promise.resolve(), workRequest:0 };
+  let authInfo = {configured:false};
+  const defaults = { theme:'dark', font:18, width:720, lh:2, warm:45 };
+  let cfg = { ...defaults };
+  try { cfg = { ...defaults, ...JSON.parse(localStorage.getItem('readerAppSettings') || '{}') }; } catch (_) {}
+  const bounds = {font:[12,32],width:[360,1400],lh:[1.4,3],warm:[0,100]};
+  function theme() {
+    for (const [key,[lo,hi]] of Object.entries(bounds)) {
+      const value=Number(cfg[key]); cfg[key]=Math.max(lo,Math.min(hi,Number.isFinite(value)?value:defaults[key]));
+    }
+    cfg.theme = cfg.theme === 'paper' ? 'paper' : 'dark';
+    const paper = cfg.theme === 'paper', root = document.documentElement.style;
+    const mix = (a,b) => `color-mix(in srgb, ${a}, ${b} ${cfg.warm}%)`;
+    const values = paper
+      ? {bg:mix('#f7f1e5','#ead09e'),text:mix('#28231e','#49351f'),title:mix('#1f1b17','#3f2b17'),surface:'#e8dcc6',button:'#f5ead5',border:'#cbb996',muted:'#756855',accent:'#76512c',primary:'#8a5a2b'}
+      : {bg:mix('#0d1117','#1b1208'),text:mix('#d7dde7','#d8b98a'),title:mix('#e6edf3','#ead0a8'),surface:'#161b22',button:'#21262d',border:'#30363d',muted:'#8b949e',accent:'#58a6ff',primary:'#1f6feb'};
+    for (const [key,value] of Object.entries(values)) root.setProperty('--'+key,value);
+    root.setProperty('--font',cfg.font+'px'); root.setProperty('--width',cfg.width+'px'); root.setProperty('--lh',cfg.lh);
+    document.documentElement.style.colorScheme = paper ? 'light' : 'dark';
+    for (const key of Object.keys(bounds)) { $(key).value=cfg[key]; $(key+'-value').textContent=cfg[key]+(key==='font'||key==='width'?'px':key==='warm'?'%':''); }
+    localStorage.setItem('readerAppSettings',JSON.stringify(cfg));
+  }
+  theme();
+  for (const key of Object.keys(bounds)) $(key).addEventListener('input',e=>{cfg[key]=e.target.value;theme();});
+  document.querySelectorAll('[data-theme]').forEach(b=>b.onclick=()=>{cfg.theme=b.dataset.theme;theme();});
+  $('show-settings').onclick=()=> $('settings').classList.toggle('hidden');
+  $('close-settings').onclick=()=> $('settings').classList.add('hidden');
+  async function api(path, data, keepalive=false) {
+    const options = data===undefined ? {} : {method:'POST',headers:{'Content-Type':'application/json','X-Reader-App':'1'},body:JSON.stringify(data),keepalive};
+    const response = await fetch('/app/api/'+path,options);
+    const payload = await response.json();
+    if (!response.ok) {
+      if(response.status===401 && path!=='login') {
+        state.reading=false; state.writable=false; clearPoll(); show('login');
+        $('settings').classList.add('hidden'); note('login-message','연결이 해제되었거나 로그인이 만료되었습니다. 다시 로그인하세요.');
+      }
+      const error = new Error(payload.error || '서버 오류'); error.status=response.status; throw error;
+    }
+    return payload;
+  }
+  const show = name => { for(const id of ['login','home','reader','account']) $(id).classList.toggle('hidden',id!==name); };
+  const note = (id,message) => $(id).textContent=message || '';
+  const clearPoll = () => { if(state.poll) clearTimeout(state.poll); state.poll=null; };
+  const poll = (fn) => { clearPoll(); state.poll=setTimeout(fn,2000); };
+  const node = (tag,text) => { const el=document.createElement(tag); el.textContent=text; return el; };
+  function loginFields(info) {
+    authInfo=info;
+    for(const id of ['username','password']) {$(id).classList.toggle('hidden',!info.configured);$(id).required=info.configured;}
+    $('token').classList.toggle('hidden',info.configured); $('token').required=!info.configured;
+    $('login-help').textContent=info.configured ? '아이디와 비밀번호로 로그인하세요.'
+      : '최초 한 번 기존 토큰으로 로그인한 뒤 계정을 설정하세요. 토큰을 모르면 서버 콘솔에서 계정을 만들 수 있습니다.';
+  }
+  async function accountScreen() {
+    await savePosition(false); clearTimeout(state.save); clearPoll(); state.workRequest++;
+    $('settings').classList.add('hidden'); show('account');
+    try {
+      loginFields(await api('me'));
+      if(!authInfo.authenticated) {show('login');return;}
+      $('account-username').value=authInfo.username||'';
+      $('account-heading').textContent=authInfo.configured?'아이디·비밀번호 변경':'소유자 계정 만들기';
+      $('account-details').open=!authInfo.configured;
+      $('current-password-row').classList.toggle('hidden',!authInfo.configured);
+      $('current-password').required=authInfo.configured;
+      $('pair-panel').classList.toggle('hidden',!authInfo.configured);
+      const devices=(await api('devices')).devices, list=$('device-list'); list.replaceChildren();
+      for(const device of devices) {
+        const row=node('div',''); row.className='item';
+        row.append(node('div',device.name+' · '+(device.kind==='device'?'스크립트':'브라우저')+(device.id===authInfo.device_id?' (현재 기기)':'')));
+        const revoke=node('button','연결 해제');
+        revoke.onclick=async()=>{
+          if(!confirm(device.name+'의 연결을 해제할까요? 읽기 기록은 삭제하지 않습니다.'))return;
+          try {await api('devices/revoke',{id:device.id}); await accountScreen();} catch(e){note('account-message',e.message);}
+        };
+        row.append(revoke);list.append(row);
+      }
+    } catch(e){note('account-message',e.message);}
+  }
+  $('account-open').onclick=accountScreen; $('reader-account').onclick=accountScreen;
+  $('devices-refresh').onclick=accountScreen; $('account-back').onclick=library;
+  $('account-form').onsubmit=async e=>{
+    e.preventDefault();
+    if($('new-password').value!==$('confirm-password').value){note('account-message','비밀번호 확인이 일치하지 않습니다.');return;}
+    const button=e.submitter; button.disabled=true;
+    try {
+      await api('account',{username:$('account-username').value.trim(),password:$('new-password').value,current_password:$('current-password').value});
+      for(const id of ['new-password','confirm-password','current-password'])$(id).value='';
+      await accountScreen();$('account-details').open=true;note('account-message','계정을 저장했습니다. 다른 기기는 다시 연결하세요.');
+    } catch(error){note('account-message',error.message);} finally{button.disabled=false;}
+  };
+  let approvalCode='';
+  async function findPair() {
+    approvalCode='';$('pair-confirm').classList.add('hidden');
+    try {
+      const result=await api('devices/request?code='+encodeURIComponent($('pair-code').value.trim().toUpperCase()));
+      approvalCode=result.request.user_code;
+      $('pair-name').textContent=result.request.name+' · '+approvalCode;
+      $('pair-confirm').classList.remove('hidden');note('pair-message','기기 이름은 요청자가 정한 이름입니다. 반드시 시작한 기기의 코드와 대조하세요.');
+    }catch(e){note('pair-message',e.message);}
+  }
+  $('pair-form').onsubmit=e=>{e.preventDefault();findPair();};
+  for(const decision of ['approve','deny'])$('pair-'+decision).onclick=async()=>{
+    if(!approvalCode)return;
+    const code=approvalCode;approvalCode='';$('pair-confirm').classList.add('hidden');
+    try {await api('devices/approve',{user_code:code,decision});history.replaceState({},'', '/app');note('pair-message',decision==='approve'?'승인했습니다. 원래 기기에서 연결 완료를 기다리세요.':'거절했습니다.');}
+    catch(e){note('pair-message',e.message);}
+  };
+  function verification(id, message, resume) {
+    note(id,message+' 이 기기의 원본 사이트가 아닌, 서버의 전용 브라우저에서 확인해야 합니다.');
+    const button=node('button','확인 완료 · 재개'), workId=state.workId;
+    button.onclick=async()=>{
+      button.disabled=true;
+      try {await api('work/'+workId+'/resume',{}); if(state.workId===workId) await resume();}
+      catch(e) {note(id,e.message);}
+      finally {button.disabled=false;}
+    };
+    $(id).append(document.createElement('br'),button);
+  }
+  async function library() {
+    clearPoll(); state.workRequest++; show('home'); $('library').classList.remove('hidden'); $('work').classList.add('hidden');
+    history.replaceState({},'', '/app');
+    try {
+      const rows=(await api('library')).works, list=$('library-list'); list.replaceChildren();
+      if(!rows.length) list.append(node('p','저장된 소설이 없습니다. URL로 추가할 수 있습니다.'));
+      for(const row of rows) {
+        const item=node('div',''); item.className='item';
+        const name=row.work_title && row.work_title!=='소설 '+row.work_id ? row.work_title : row.title || row.work_title || '소설 '+row.work_id;
+        const info=node('div',''); info.append(node('strong',name),node('small',row.episode_title ? '저장 회차 '+row.episode_title : row.episode_id ? '저장된 회차로 이동' : '회차 목록 열기'));
+        const button=node('button',row.episode_id?'이어보기':'목록'); button.onclick=()=>openWork(row.work_id,row.episode_id);
+        item.append(info,button); list.append(item);
+      }
+      note('library-message','');
+    } catch(e) {note('library-message',e.message);}
+  }
+  async function openWork(workId, desiredEpisode='') {
+    clearTimeout(state.save);
+    if(!$('reader').classList.contains('hidden')) await savePosition(false);
+    if(state.workId!==workId) {
+      state.episodeId=''; state.remote=null; state.writable=false; state.reading=false; state.transitionFrom='';
+    }
+    clearPoll(); state.workId=workId; show('home'); $('library').classList.add('hidden'); $('work').classList.remove('hidden');
+    const request=++state.workRequest; $('episode-list').replaceChildren(); note('work-message','회차 목록 불러오는 중…');
+    history.replaceState({},'', '/app?work='+encodeURIComponent(workId));
+    try {
+      const result=await api('work/'+workId); if(request!==state.workRequest) return; state.work=result;
+      $('work-title').textContent=result.work?.title && result.work.title!=='소설 '+workId
+        ? result.work.title : result.progress?.title || result.work?.title || '소설 '+workId;
+      $('source-chooser').classList.toggle('hidden',!!result.work?.host);
+      const list=$('episode-list'); list.replaceChildren();
+      for(const chapter of result.episodes) {
+        const button=node('button',chapter.title || chapter.ordinal+'화');
+        if(chapter.episode_id===result.progress?.episode_id) button.classList.add('current');
+        button.onclick=()=>openEpisode(chapter.episode_id);
+        list.append(button);
+      }
+      const job=result.list_job;
+      note('work-message',job?.state==='error' ? job.error : !result.work?.host ? '출처를 선택하세요.'
+        : job?.state==='queued'||job?.state==='running' ? '전체 회차 목록 수집 중…'
+        : result.episodes.length ? result.episodes.length+'개 회차' : '목록을 새로고침하세요.');
+      if(desiredEpisode && result.episodes.some(x=>x.episode_id===desiredEpisode)) return openEpisode(desiredEpisode);
+      if(result.verification) {verification('work-message',result.verification,()=>openWork(workId,desiredEpisode));return;}
+      if(job?.state==='queued'||job?.state==='running') poll(()=>openWork(workId,desiredEpisode));
+      else list.querySelector('.current')?.scrollIntoView({block:'center'});
+    } catch(e) {if(request===state.workRequest)note('work-message',e.message);}
+  }
+  async function openEpisode(episodeId) {
+    clearPoll(); clearTimeout(state.save);
+    if(!$('reader').classList.contains('hidden') && state.episodeId!==episodeId) await savePosition(false);
+    const previous=state.episodeId; state.episodeId=episodeId; state.reading=false;
+    const workId=state.workId;
+    if(!state.work || state.work.work?.work_id!==workId) state.work=await api('work/'+workId);
+    state.remote=state.work.progress;
+    const savedIndex=state.work.episodes.findIndex(x=>x.episode_id===state.remote?.episode_id);
+    const targetIndex=state.work.episodes.findIndex(x=>x.episode_id===episodeId);
+    const advancing=!state.remote?.deleted && savedIndex>=0 && targetIndex>savedIndex;
+    state.transitionFrom=advancing ? state.remote.episode_id
+      : previous===episodeId ? state.transitionFrom : '';
+    state.writable=!state.remote || (!state.remote.deleted && (!state.remote.episode_id || state.remote.episode_id===episodeId || !!state.transitionFrom));
+    show('reader'); $('content').replaceChildren(); note('reader-message','본문 불러오는 중…'); scrollTo(0,0);
+    history.replaceState({},'', '/app?work='+workId+'&ep='+episodeId);
+    try {
+      const info=await api('episode/'+workId+'/'+episodeId);
+      if(state.episodeId!==episodeId) return;
+      const chapter=state.work.episodes.find(x=>x.episode_id===episodeId);
+      $('reader-title').textContent=chapter?.title || info.episode.title;
+      const index=state.work.episodes.findIndex(x=>x.episode_id===episodeId);
+      $('previous').disabled=index<=0; $('next').disabled=index<0||index>=state.work.episodes.length-1;
+      $('previous').onclick=()=>openEpisode(state.work.episodes[index-1].episode_id);
+      $('next').onclick=()=>openEpisode(state.work.episodes[index+1].episode_id);
+      const content=$('content'); content.replaceChildren();
+      if(info.episode.state==='ready' && info.episode.paragraphs?.length) {
+        for(const paragraph of info.episode.paragraphs) content.append(node('p',paragraph));
+        note('reader-message',state.writable?'':state.remote?.deleted
+          ? '삭제된 기록입니다. 다시 저장하려면 저장 버튼을 누르세요.'
+          : '서버에는 다른 회차가 저장되어 있습니다. 이 회차는 로컬에서만 읽습니다.');
+        const ratio=!state.remote?.deleted && state.remote?.episode_id===episodeId ? Number(state.remote.position)||0 : Number(sessionStorage.getItem('readerPosition:'+workId+':'+episodeId))||0;
+        requestAnimationFrame(()=>{
+          if(state.workId!==workId || state.episodeId!==episodeId) return;
+          scrollTo(0,ratio*Math.max(0,document.documentElement.scrollHeight-innerHeight));
+          state.reading=true;
+          if(state.transitionFrom || !state.remote?.episode_id) savePosition(false);
+        });
+      } else if(info.episode.state==='locked') {
+        note('reader-message',info.episode.error || '잠긴 회차입니다.');
+        const original=node('a','원본에서 확인'); original.href=info.episode.source_url; content.append(original);
+      } else if(info.verification) {
+        verification('reader-message',info.verification,()=>openEpisode(episodeId));
+      } else if(info.episode.state==='error') {
+        note('reader-message',info.episode.error || '본문 수집에 실패했습니다.');
+        const retry=node('button','다시 시도'); retry.onclick=async()=>{await api('episode/'+workId+'/'+episodeId+'/retry',{});openEpisode(episodeId);}; content.append(retry);
+        const original=node('a','원본에서 확인'); original.href=info.episode.source_url; content.append(original);
+      } else {
+        note('reader-message','본문 수집 중…'); poll(()=>openEpisode(episodeId));
+      }
+    } catch(e) {note('reader-message',e.message);}
+  }
+  async function savePosition(manual, keepalive=false) {
+    if(!state.reading||!state.workId||!state.episodeId||$('reader').classList.contains('hidden')) return;
+    const workId=state.workId, episodeId=state.episodeId;
+    const ratio=Math.max(0,Math.min(1,scrollY/Math.max(1,document.documentElement.scrollHeight-innerHeight)));
+    try { sessionStorage.setItem('readerPosition:'+workId+':'+episodeId,String(ratio)); } catch (_) {}
+    if(!state.writable && !manual) return;
+    const previous=state.saving;
+    let finish;
+    state.saving=new Promise(resolve=>{finish=resolve;});
+    await previous;
+    try {
+      if(state.workId!==workId || state.episodeId!==episodeId || (!state.writable && !manual)) return;
+      if(manual) {
+        const fresh=await api('work/'+workId); state.remote=fresh.progress;
+        if(state.remote && (state.remote.deleted || state.remote.episode_id!==episodeId)
+          && !confirm(state.remote.deleted ? '삭제된 기록을 다시 저장할까요?' : '서버의 다른 회차 기록을 현재 회차로 바꿀까요?')) return;
+      }
+      const payload={work_id:workId,episode_id:episodeId,position:ratio,
+        title:state.work.work?.title || '',expected_revision:state.remote?.revision || 0,
+        allow_rewind:!!manual,device_id:'web-app'};
+      const saved=await api('progress',payload,keepalive);
+      if(state.workId===workId) {
+        state.remote={episode_id:episodeId,position:saved.position,revision:saved.revision};
+        state.work.progress=state.remote;
+        if(state.episodeId===episodeId) {state.writable=true; state.transitionFrom=''; if(manual) note('reader-message','서버에 저장했습니다.');}
+      }
+    } catch(e) {
+      if(state.workId===workId && state.episodeId===episodeId) {
+        if(e.status===409) {state.writable=false;state.transitionFrom='';note('reader-message','다른 기기의 최신 기록이 있습니다. 자동 저장을 멈췄습니다.');}
+        else if(manual) note('reader-message','저장 실패: '+e.message);
+      }
+    } finally {finish();}
+  }
+  window.addEventListener('scroll',()=>{if($('reader').classList.contains('hidden'))return;clearTimeout(state.save);state.save=setTimeout(()=>savePosition(false),700);},{passive:true});
+  window.addEventListener('pagehide',()=>{if(!$('reader').classList.contains('hidden'))savePosition(false,true);});
+  $('manual-save').onclick=()=>savePosition(true);
+  $('show-list').onclick=()=>openWork(state.workId);
+  $('back-library').onclick=library;
+  $('refresh-list').onclick=async()=>{await api('work/'+state.workId+'/refresh',{});openWork(state.workId);};
+  $('save-source').onclick=async()=>{await api('work/'+state.workId+'/source',{host:$('source').value});openWork(state.workId,state.work?.progress?.episode_id || '');};
+  $('add-work').onclick=async()=>{try{const result=await api('works',{url:$('add-url').value.trim()});$('add-url').value='';openWork(result.work_id,result.episode_id);}catch(e){note('library-message',e.message);}};
+  $('logout').onclick=async()=>{await api('logout',{});clearPoll();show('login');};
+  async function enter() {
+    loginFields(await api('me'));
+    const pair=new URLSearchParams(location.hash.slice(1)).get('connect');
+    if(pair) {await accountScreen();$('pair-code').value=pair; if(authInfo.configured)await findPair(); return;}
+    if(location.hash==='#devices') {await accountScreen();return;}
+    const params=new URLSearchParams(location.search),work=params.get('work'),ep=params.get('ep');
+    if(work&&/^\d+$/.test(work)) openWork(work,ep||''); else library();
+  }
+  $('login-form').onsubmit=async e=>{e.preventDefault();try{
+    await api('login',authInfo.configured?{username:$('username').value.trim(),password:$('password').value}:{token:$('token').value});
+    $('token').value='';$('password').value='';await enter();
+  }catch(error){note('login-message',error.message);}};
+  api('me').then(result=>{loginFields(result);if(result.authenticated)enter();else show('login');}).catch(()=>show('login'));
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,20 @@
+[Unit]
+Description=Reader source connection proxy (loopback only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=reader-sync
+Group=reader-sync
+ExecStart=/opt/reader-sync/spoofdpi --clean --no-tui --listen-addr 127.0.0.1:8081 --https-split-mode chunk --https-chunk-size 1 --https-disorder
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+MemoryMax=64M
+
+[Install]
+WantedBy=multi-user.target

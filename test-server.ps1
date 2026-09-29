@@ -1,8 +1,9 @@
 $ErrorActionPreference = 'Stop'
 $testDb = Join-Path $env:TEMP ('reader-sync-' + [guid]::NewGuid() + '.db')
 $testPort = Get-Random -Minimum 20000 -Maximum 30000
-$legacySetup = 'import sqlite3,sys; db=sqlite3.connect(sys.argv[1]); db.execute("CREATE TABLE progress (kind TEXT NOT NULL, work_id TEXT NOT NULL, episode_id TEXT NOT NULL, position REAL NOT NULL, title TEXT NOT NULL DEFAULT '''', device_id TEXT NOT NULL DEFAULT '''', updated_at INTEGER NOT NULL, PRIMARY KEY (kind, work_id))"); db.close()'
-python -c $legacySetup $testDb
+$legacySetup = 'import sqlite3,sys; db=sqlite3.connect(sys.argv[1]); db.execute(sys.argv[2]); db.close()'
+$legacySql = "CREATE TABLE progress (kind TEXT NOT NULL, work_id TEXT NOT NULL, episode_id TEXT NOT NULL, position REAL NOT NULL, title TEXT NOT NULL DEFAULT '', device_id TEXT NOT NULL DEFAULT '', updated_at INTEGER NOT NULL, PRIMARY KEY (kind, work_id))"
+python -c $legacySetup $testDb $legacySql
 if ($LASTEXITCODE -ne 0) { throw 'Legacy database setup failed.' }
 $env:SYNC_DB = $testDb
 $env:SYNC_TOKEN = 'integration-test-token'
@@ -55,6 +56,9 @@ try {
   }
   Write-Host 'reader sync integration checks passed'
 } finally {
-  if ($process -and -not $process.HasExited) { Stop-Process -Id $process.Id -Force }
+  if ($process -and -not $process.HasExited) {
+    Stop-Process -Id $process.Id -Force
+    $process.WaitForExit(5000) | Out-Null
+  }
   if (Test-Path -LiteralPath $testDb) { Remove-Item -LiteralPath $testDb -Force }
 }

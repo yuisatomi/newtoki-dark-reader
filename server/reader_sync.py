@@ -6,8 +6,12 @@ import os
 import sqlite3
 import sys
 import time
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
+
+import reader_app
+import reader_auth
 
 
 DB_PATH = os.environ.get("SYNC_DB", "/var/lib/reader-sync/progress.db")
@@ -18,10 +22,15 @@ ALLOWED_NETWORK = ipaddress.ip_network(
 PORT = int(os.environ.get("SYNC_PORT", "8787"))
 
 
+@contextmanager
 def connect():
     db = sqlite3.connect(DB_PATH, timeout=5)
     db.row_factory = sqlite3.Row
-    return db
+    try:
+        with db:
+            yield db
+    finally:
+        db.close()
 
 
 def init_db():
@@ -45,6 +54,7 @@ def init_db():
             db.execute("ALTER TABLE progress ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0")
         if "revision" not in columns:
             db.execute("ALTER TABLE progress ADD COLUMN revision INTEGER NOT NULL DEFAULT 1")
+    reader_app.init_db(connect)
 
 
 def valid_id(value):
@@ -75,20 +85,72 @@ def expected_revision(data):
     return value
 
 
+def store_progress(data):
+    if not isinstance(data, dict):
+        raise ValueError("JSON object required")
+    kind, work_id, episode_id, position, title, device_id = validate_progress(data)
+    expected = expected_revision(data)
+    allow_rewind = data.get("allow_rewind", False)
+    if type(allow_rewind) is not bool or (allow_rewind and expected is None):
+        raise ValueError("invalid allow_rewind")
+    updated_at = int(time.time() * 1000)
+    rejected = False
+    current = None
+    with connect() as db:
+        db.execute("BEGIN IMMEDIATE")
+        row = db.execute(
+            "SELECT kind, work_id, episode_id, position, title, device_id, updated_at, deleted, revision "
+            "FROM progress WHERE kind=? AND work_id=?", (kind, work_id)
+        ).fetchone()
+        current = dict(row) if row else None
+        if current:
+            rejected = (expected != current["revision"] if expected is not None else
+                        current["deleted"] or current["episode_id"] != episode_id)
+            if not rejected:
+                title = title or current["title"]
+                if current["episode_id"] == episode_id and not current["deleted"] and not allow_rewind:
+                    position = max(position, current["position"])
+                if (current["episode_id"] == episode_id and not current["deleted"] and
+                        position == current["position"] and title == current["title"]):
+                    updated_at = current["updated_at"]
+                    revision = current["revision"]
+                else:
+                    revision = current["revision"] + 1
+                    db.execute("""
+                        UPDATE progress SET episode_id=?, position=?, title=?, device_id=?,
+                            updated_at=?, deleted=0, revision=? WHERE kind=? AND work_id=?
+                    """, (episode_id, position, title, device_id, updated_at, revision, kind, work_id))
+        elif expected not in (None, 0):
+            rejected = True
+        else:
+            revision = 1
+            db.execute("""
+                INSERT INTO progress
+                    (kind, work_id, episode_id, position, title, device_id, updated_at, revision)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (kind, work_id, episode_id, position, title, device_id, updated_at, revision))
+    if rejected:
+        return 409, {"error": "stale progress", "progress": current}
+    return 200, {"ok": True, "updated_at": updated_at, "revision": revision, "position": position}
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "ReaderSync/1"
 
     def log_message(self, fmt, *args):
-        sys.stderr.write("%s %s\n" % (self.address_string(), fmt % args))
+        # Do not retain pairing codes from query strings in access logs.
+        clean = tuple(item.split('?', 1)[0] if isinstance(item, str) and '?' in item else item for item in args)
+        sys.stderr.write("%s %s\n" % (self.address_string(), fmt % clean))
 
     def send_json(self, status, payload):
         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type")
-        self.send_header("Access-Control-Allow-Methods", "GET, PUT, DELETE, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
         self.end_headers()
         self.wfile.write(body)
 
@@ -101,7 +163,9 @@ class Handler(BaseHTTPRequestHandler):
     def authorized(self):
         supplied = self.headers.get("Authorization", "")
         expected = "Bearer " + SYNC_TOKEN
-        return bool(SYNC_TOKEN) and hmac.compare_digest(supplied, expected)
+        if bool(SYNC_TOKEN) and hmac.compare_digest(supplied.encode(), expected.encode()):
+            return True
+        return supplied.startswith('Bearer ') and bool(reader_auth.credential(connect, supplied[7:], 'device'))
 
     def require_access(self):
         if not self.allowed():
@@ -113,10 +177,17 @@ class Handler(BaseHTTPRequestHandler):
         return True
 
     def do_OPTIONS(self):
+        if urlparse(self.path).path.startswith("/app"):
+            self.send_response(405)
+            self.end_headers()
+            return
         self.send_json(204, {})
 
     def do_GET(self):
         parsed = urlparse(self.path)
+        if parsed.path == "/app" or parsed.path.startswith("/app/"):
+            reader_app.handle_get(self, connect, SYNC_TOKEN)
+            return
         if parsed.path == "/health":
             self.send_json(200, {"ok": True})
             return
@@ -160,54 +231,30 @@ class Handler(BaseHTTPRequestHandler):
             if not 0 < length <= 16384:
                 raise ValueError("invalid content length")
             data = json.loads(self.rfile.read(length))
-            kind, work_id, episode_id, position, title, device_id = validate_progress(data)
-            expected = expected_revision(data)
-            allow_rewind = data.get("allow_rewind", False)
-            if type(allow_rewind) is not bool or (allow_rewind and expected is None):
-                raise ValueError("invalid allow_rewind")
+            status, payload = store_progress(data)
         except (ValueError, TypeError, json.JSONDecodeError) as exc:
             self.send_json(400, {"error": str(exc)})
             return
-        updated_at = int(time.time() * 1000)
-        rejected = False
-        current = None
-        with connect() as db:
-            db.execute("BEGIN IMMEDIATE")
-            row = db.execute(
-                "SELECT kind, work_id, episode_id, position, title, device_id, updated_at, deleted, revision "
-                "FROM progress WHERE kind=? AND work_id=?", (kind, work_id)
-            ).fetchone()
-            current = dict(row) if row else None
-            if current:
-                rejected = (expected != current["revision"] if expected is not None else
-                            current["deleted"] or current["episode_id"] != episode_id)
-                if not rejected:
-                    title = title or current["title"]
-                    if current["episode_id"] == episode_id and not current["deleted"] and not allow_rewind:
-                        position = max(position, current["position"])
-                    if (current["episode_id"] == episode_id and not current["deleted"] and
-                            position == current["position"] and title == current["title"]):
-                        updated_at = current["updated_at"]
-                        revision = current["revision"]
-                    else:
-                        revision = current["revision"] + 1
-                        db.execute("""
-                            UPDATE progress SET episode_id=?, position=?, title=?, device_id=?,
-                                updated_at=?, deleted=0, revision=? WHERE kind=? AND work_id=?
-                        """, (episode_id, position, title, device_id, updated_at, revision, kind, work_id))
-            elif expected not in (None, 0):
-                rejected = True
-            else:
-                revision = 1
-                db.execute("""
-                    INSERT INTO progress
-                        (kind, work_id, episode_id, position, title, device_id, updated_at, revision)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """, (kind, work_id, episode_id, position, title, device_id, updated_at, revision))
-        if rejected:
-            self.send_json(409, {"error": "stale progress", "progress": current})
-        else:
-            self.send_json(200, {"ok": True, "updated_at": updated_at, "revision": revision, "position": position})
+        self.send_json(status, payload)
+
+    def do_POST(self):
+        parsed = urlparse(self.path)
+        if parsed.path in ('/v1/auth/device/start', '/v1/auth/device/poll'):
+            if not self.allowed():
+                self.send_json(403, {'error': 'network not allowed'})
+                return
+            try:
+                data = reader_app.read_json(self)
+            except (ValueError, TypeError) as exc:
+                self.send_json(400, {'error': str(exc)})
+                return
+            status, payload = reader_auth.device_request(connect, parsed.path, data)
+            self.send_json(status, payload)
+            return
+        if parsed.path == "/app" or parsed.path.startswith("/app/"):
+            reader_app.handle_post(self, connect, SYNC_TOKEN, store_progress)
+            return
+        self.send_json(404, {"error": "not found"})
 
     def do_DELETE(self):
         parsed = urlparse(self.path)
@@ -256,8 +303,18 @@ def self_test():
 if __name__ == "__main__":
     if "--self-test" in sys.argv:
         self_test()
-    else:
-        if not SYNC_TOKEN:
-            raise SystemExit("SYNC_TOKEN is required")
+    elif '--set-password' in sys.argv:
+        from getpass import getpass
         init_db()
+        username = input('Owner username: ').strip()
+        password = getpass('New password (15+ characters): ')
+        if password != getpass('Confirm password: '):
+            raise SystemExit('Passwords do not match')
+        reader_auth.set_password(connect, username, password, reset=True)
+        print('Owner account saved; browser/device credentials revoked. Reading data preserved.')
+    else:
+        init_db()
+        if not SYNC_TOKEN and not reader_auth.account(connect):
+            raise SystemExit('Configure an owner with --set-password or provide SYNC_TOKEN for migration')
+        reader_app.start_worker(connect)
         ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
