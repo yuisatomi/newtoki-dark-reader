@@ -134,6 +134,20 @@ def store_progress(data):
     return 200, {"ok": True, "updated_at": updated_at, "revision": revision, "position": position}
 
 
+def delete_progress(db, kind, work_id, clear=False):
+    """Keep a tombstone so an offline device cannot silently restore a deletion."""
+    db.execute("""INSERT INTO progress
+        (kind,work_id,episode_id,position,title,device_id,updated_at,deleted)
+        VALUES(?,?,'',0,'','',?,1)
+        ON CONFLICT(kind,work_id) DO UPDATE SET
+          updated_at=excluded.updated_at,deleted=1,revision=progress.revision+1,
+          episode_id=CASE WHEN ? THEN '' ELSE progress.episode_id END,
+          position=CASE WHEN ? THEN 0 ELSE progress.position END,
+          title=CASE WHEN ? THEN '' ELSE progress.title END,
+          device_id=CASE WHEN ? THEN '' ELSE progress.device_id END
+        """, (kind, work_id, int(time.time() * 1000), clear, clear, clear, clear))
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "ReaderSync/1"
 
@@ -252,7 +266,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(status, payload)
             return
         if parsed.path == "/app" or parsed.path.startswith("/app/"):
-            reader_app.handle_post(self, connect, SYNC_TOKEN, store_progress)
+            reader_app.handle_post(self, connect, SYNC_TOKEN, store_progress, delete_progress)
             return
         self.send_json(404, {"error": "not found"})
 
@@ -269,17 +283,8 @@ class Handler(BaseHTTPRequestHandler):
         if kind not in ("novel", "webtoon") or not valid_id(work_id):
             self.send_json(400, {"error": "kind and work_id are required"})
             return
-        updated_at = int(time.time() * 1000)
         with connect() as db:
-            db.execute("""
-                INSERT INTO progress
-                    (kind, work_id, episode_id, position, title, device_id, updated_at, deleted)
-                VALUES (?, ?, '', 0, '', '', ?, 1)
-                ON CONFLICT(kind, work_id) DO UPDATE SET
-                    updated_at=excluded.updated_at,
-                    deleted=1,
-                    revision=progress.revision+1
-            """, (kind, work_id, updated_at))
+            delete_progress(db, kind, work_id)
         self.send_json(200, {"ok": True})
 
 

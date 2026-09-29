@@ -28,6 +28,13 @@
   .item:last-child { border-bottom:0; }
   .item div:first-child { min-width:0; flex:1; }
   .item strong { display:block; color:var(--title); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #manage-list h2 { overflow-wrap:anywhere; }
+  #manage-list input[type=number] { width:95px; }
+  #restore-file { max-width:100%; }
+  .resource-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:16px; }
+  .resource-grid h3 { margin:8px 0; font-size:1rem; }
+  .resource-grid p { margin:6px 0; overflow-wrap:anywhere; }
+  .danger { border-color:#be5858; }
   .muted,.message { color:var(--muted); font-size:.85rem; }
   .message { min-height:1.6em; }
   .toolbar { margin:14px 0; }
@@ -48,6 +55,10 @@
   #settings label { display:block; margin:10px 0; font-size:.83rem; color:var(--muted); }
   #settings label span { float:right; }
   #reader-nav button { flex:1 1 auto; max-width:130px; }
+  #reader-status { flex-basis:100%; text-align:center; font-size:.85rem; color:var(--text); }
+  #save-feedback { margin-left:10px; }
+  #reader-nav.collapsed { transform:translateY(110%); visibility:hidden; }
+  #show-nav { position:fixed; right:12px; bottom:calc(12px + env(safe-area-inset-bottom)); z-index:10; }
   @media(max-width:600px) { #reader { padding:16px 17px 110px; } #reader-nav { gap:5px; } #reader-nav button { padding:9px 4px; font-size:.9rem; } }
 </style>
 </head>
@@ -65,7 +76,7 @@
   </div>
 </main>
 <main class="shell hidden" id="home">
-  <header><h1>📚 소설 읽기</h1><div class="controls"><button id="account-open">계정·기기</button><button id="logout">로그아웃</button></div></header>
+  <header><h1>📚 소설 읽기</h1><div class="controls"><button id="manage-open">작품 관리</button><button id="account-open">계정·기기</button><button id="logout">로그아웃</button></div></header>
   <section id="library">
     <div class="toolbar"><input id="add-url" type="url" placeholder="소설 작품 또는 회차 URL"><button class="primary" id="add-work">작품 추가</button></div>
     <p class="message" id="library-message"></p>
@@ -81,6 +92,26 @@
     <p class="message" id="work-message"></p>
     <div id="episode-list" class="card"></div>
   </section>
+</main>
+<main class="shell hidden" id="manage">
+  <header><h1>소설 데이터 관리</h1><div class="controls"><button id="manage-refresh">새로고침</button><button id="manage-back">읽던 작품</button></div></header>
+  <section class="card" id="resources" aria-labelledby="resources-heading">
+    <div class="controls"><h2 id="resources-heading">서버 리소스</h2><button id="resources-refresh">리소스 새로고침</button></div>
+    <p id="resources-status" class="muted" role="status">확인 중…</p>
+    <div class="resource-grid">
+      <div><h3>RAM</h3><p id="resource-memory">확인 중…</p><p id="resource-memory-detail" class="muted"></p><p id="resource-swap" class="muted"></p></div>
+      <div><h3>디스크</h3><p id="resource-disk">확인 중…</p><p id="resource-disk-free" class="muted"></p><p class="muted">DB가 저장된 파일시스템 전체 기준</p></div>
+      <div><h3>DB 용량</h3><p id="resource-db">확인 중…</p><p id="resource-db-detail" class="muted"></p><p id="resource-db-free" class="muted"></p></div>
+    </div>
+    <p class="muted">이 화면이 보일 때만 10초마다 갱신합니다. DB에서 내용을 삭제해도 파일 크기는 바로 줄지 않으며, 빈 공간을 다음 저장에 재사용합니다.</p>
+  </section>
+  <p class="muted">전체 삭제는 읽은 회차·위치, 회차 목록, 저장 본문과 수집 작업을 제거합니다. 다른 기기에는 다음 동기화 때 반영됩니다. 재업로드 방지용 삭제 표시와 기존 서버 백업은 남습니다.</p>
+  <details class="card"><summary>작품 백업 파일 복원</summary>
+    <p class="muted">작품별 JSON 파일(최대 32 MB)을 복원합니다. 같은 작품의 목록·본문·읽은 위치를 교체하며, 다른 작품과 계정은 유지합니다. 복원 후 수집은 일시정지됩니다. 백업은 암호화되지 않으므로 안전하게 보관하세요.</p>
+    <form id="restore-form"><input id="restore-file" type="file" accept=".json,application/json" aria-label="작품 백업 파일" required><button>파일 복원</button></form>
+  </details>
+  <p id="manage-message" class="message" role="status"></p>
+  <div id="manage-list"></div>
 </main>
 <main class="shell hidden" id="account">
   <header><h1>계정·연결된 기기</h1><button id="account-back">읽던 작품</button></header>
@@ -108,12 +139,16 @@
 </main>
 <article id="reader" class="hidden">
   <h1 id="reader-title"></h1>
+  <p class="muted">좌측 여백: 한 화면 위로 · 우측 여백: 한 화면 아래로</p>
   <p class="message" id="reader-message"></p>
   <div id="content"></div>
   <div id="reader-nav">
+    <div id="reader-status"><span id="current-episode" aria-live="polite"></span><span id="save-feedback" role="status"></span></div>
     <button id="previous">◀ 이전화</button><button id="next" class="primary">다음화 ▶</button>
     <button id="show-list">☰ 목록</button><button id="manual-save">💾 저장</button><button id="show-settings">⚙ 설정</button>
+    <button id="hide-nav" aria-label="하단바 숨기기">⌄ 숨기기</button>
   </div>
+  <button id="show-nav" class="hidden" aria-controls="reader-nav" aria-expanded="false">☰ 메뉴</button>
 </article>
 <aside id="settings" class="hidden">
   <div class="controls"><button data-theme="dark">☾ 야간 다크</button><button data-theme="paper">☀ 주간 종이색</button></div>
@@ -123,11 +158,22 @@
   <label>따뜻한 색감 <span id="warm-value"></span><input id="warm" type="range" min="0" max="100"></label>
   <button id="close-settings">닫기</button>
   <button id="reader-account">계정·기기</button>
+  <button id="reader-manage">작품 관리</button>
 </aside>
 <script>
 (() => {
   const $ = id => document.getElementById(id);
-  const state = { workId:'', episodeId:'', work:null, remote:null, writable:false, reading:false, transitionFrom:'', poll:null, save:null, saving:Promise.resolve(), workRequest:0 };
+  const state = { workId:'', episodeId:'', work:null, remote:null, writable:false, reading:false, manualSaving:false, transitionFrom:'', poll:null, save:null, saving:Promise.resolve(), workRequest:0 };
+  let navScrollY=0, navKeepUntil=0;
+  let resourcesTimer=null, resourcesLoading=false;
+  function setNavVisible(visible) {
+    $('reader-nav').classList.toggle('collapsed',!visible);
+    $('show-nav').classList.toggle('hidden',visible);
+    $('show-nav').setAttribute('aria-expanded',String(visible));
+    navScrollY=scrollY;
+  }
+  $('hide-nav').onclick=()=>{if(!state.manualSaving){$('settings').classList.add('hidden');setNavVisible(false);}};
+  $('show-nav').onclick=()=>setNavVisible(true);
   let authInfo = {configured:false};
   const defaults = { theme:'dark', font:18, width:720, lh:2, warm:45 };
   let cfg = { ...defaults };
@@ -167,11 +213,137 @@
     }
     return payload;
   }
-  const show = name => { for(const id of ['login','home','reader','account']) $(id).classList.toggle('hidden',id!==name); };
+  const show = name => {
+    for(const id of ['login','home','reader','account','manage']) $(id).classList.toggle('hidden',id!==name);
+    if(name!=='manage'){clearTimeout(resourcesTimer);resourcesTimer=null;}
+  };
   const note = (id,message) => $(id).textContent=message || '';
   const clearPoll = () => { if(state.poll) clearTimeout(state.poll); state.poll=null; };
   const poll = (fn) => { clearPoll(); state.poll=setTimeout(fn,2000); };
   const node = (tag,text) => { const el=document.createElement(tag); el.textContent=text; return el; };
+  function bytes(value) {
+    if(value===null || value===undefined || !Number.isFinite(value))return '확인 불가';
+    let unit=0;const units=['B','KiB','MiB','GiB','TiB'];
+    while(value>=1024 && unit<units.length-1){value/=1024;unit++;}
+    return value.toFixed(unit?1:0)+' '+units[unit];
+  }
+  function usage(used,total) {
+    const percent=Number.isFinite(used)&&Number.isFinite(total)&&total>0 ? ' ('+(used/total*100).toFixed(1)+'%)' : '';
+    return bytes(used)+' / '+bytes(total)+percent;
+  }
+  async function refreshResources() {
+    clearTimeout(resourcesTimer);resourcesTimer=null;
+    if(resourcesLoading || document.hidden || $('manage').classList.contains('hidden'))return;
+    resourcesLoading=true;$('resources-refresh').disabled=true;
+    try {
+      const info=await api('manage/resources'),memory=info.memory,disk=info.disk,db=info.database;
+      if($('manage').classList.contains('hidden'))return;
+      $('resource-memory').textContent='사용 '+usage(memory.used,memory.total);
+      $('resource-memory-detail').textContent='사용 가능 '+bytes(memory.available)+' · '+(memory.source==='cgroup'?'컨테이너 cgroup 한도 기준, 캐시 포함':'운영체제 제공값, 회수 가능한 캐시 제외')
+        +(memory.source!=='cgroup'&&memory.cache_inclusive!==null?' · cgroup 캐시 포함 사용량 '+bytes(memory.cache_inclusive):'');
+      $('resource-swap').textContent='Swap '+usage(memory.swap_used,memory.swap_total);
+      $('resource-disk').textContent=disk?'사용 '+usage(disk.used,disk.total):'확인 불가';
+      $('resource-disk-free').textContent=disk?'남은 공간 '+bytes(disk.free):'';
+      $('resource-db').textContent=db?'본체 '+bytes(db.main)+' · 합계 '+bytes(db.total):'확인 불가';
+      $('resource-db-detail').textContent=db?'WAL '+bytes(db.wal)+' · SHM '+bytes(db.shm)+' · Journal '+bytes(db.journal):'';
+      $('resource-db-free').textContent=db?'DB 내부 재사용 가능 '+bytes(db.reusable):'';
+      note('resources-status','최근 확인 '+new Date(info.sampled_at).toLocaleTimeString());
+    } catch(e) {note('resources-status','갱신 실패: '+e.message+' · 기존 표시값은 최신이 아닐 수 있습니다.');}
+    finally {
+      resourcesLoading=false;$('resources-refresh').disabled=false;
+      if(!document.hidden&&!$('manage').classList.contains('hidden'))resourcesTimer=setTimeout(refreshResources,10000);
+    }
+  }
+  $('resources-refresh').onclick=refreshResources;
+  document.addEventListener('visibilitychange',()=>{
+    clearTimeout(resourcesTimer);resourcesTimer=null;
+    if(!document.hidden&&!$('manage').classList.contains('hidden'))refreshResources();
+  });
+  async function manageScreen() {
+    await savePosition(false); clearTimeout(state.save); clearPoll();
+    state.workRequest++;state.reading=false;state.writable=false;state.episodeId='';
+    $('settings').classList.add('hidden');show('manage');
+    refreshResources();
+    history.replaceState({},'', '/app/manage');note('manage-message','저장 현황 불러오는 중…');
+    try {
+      const rows=(await api('manage')).works,list=$('manage-list');list.replaceChildren();
+      for(const row of rows) {
+        const card=node('section','');card.className='card';card.dataset.workId=row.work_id;
+        card.append(node('h2',row.title));
+        const read=row.episode_id ? (row.episode_title || '회차 제목 미수집')+' · '+Math.round(row.position*100)+'% 지점' : '읽기 기록 없음';
+        card.append(node('p','읽은 위치: '+read));
+        card.append(node('p',`회차 목록 ${row.total}개 · 본문 저장 ${row.ready}개 · 잠김 ${row.locked}개`));
+        card.append(node('p',`수집 대기/진행 ${row.pending}개 · 오류 작업 ${row.errors}개 · 사람 확인 대기 ${row.verification}개`));
+        card.append(node('p','본문 텍스트 약 '+(row.bytes/1024).toFixed(1)+' KB'+(row.host?' · '+row.host:'')));
+        card.append(node('p',(row.paused?'수집 일시정지':'수집 허용')+` · 저장 한도 대기 ${row.capacity}개`));
+        const actions=node('div','');actions.className='controls';
+        const open=node('button','회차 목록');open.onclick=()=>openWork(row.work_id);
+        async function change(button,path,data,message) {
+          button.disabled=true;
+          try {
+            await api('manage/'+path,{work_id:row.work_id,...data});
+            if(state.workId===row.work_id)state.work=null;
+            await manageScreen();note('manage-message',message);
+          } catch(e){note('manage-message',e.message);button.disabled=false;}
+        }
+        const pause=node('button',row.paused?'수집 재개':'수집 일시정지');
+        pause.onclick=()=>change(pause,'settings',{settings:{paused:row.paused?0:1,prefetch:row.prefetch,cache_limit_mb:row.cache_limit_mb}},row.paused?'수집을 재개했습니다. 사람 확인 대기는 별도로 해제해야 합니다.':'수집을 일시정지했습니다. 이미 진행 중인 요청 한 건은 완료될 수 있습니다.');
+        const retry=node('button','실패 작업 재시도');retry.disabled=!row.errors&&!row.failed;
+        retry.onclick=()=>change(retry,'retry',{},'실패 작업을 재시도 대열에 넣었습니다. 일시정지·사람 확인·저장 한도 제한은 유지됩니다.');
+        const clear=node('button','본문만 삭제');clear.className='danger';
+        clear.onclick=()=>{
+          if(confirm(`「${row.title}」 본문 ${row.ready}개를 삭제할까요?\n읽은 회차·위치와 회차 목록은 유지하고, 자동 재수집을 막기 위해 수집을 일시정지합니다.`))
+            change(clear,'cache-clear',{confirm:true},'본문을 삭제했습니다. 읽기 기록은 유지되며, 다시 수집하려면 수집 재개를 누르세요.');
+        };
+        const backup=node('button','작품 백업');
+        backup.onclick=async()=>{
+          backup.disabled=true;
+          try {
+            const data=await api('manage/backup?work_id='+encodeURIComponent(row.work_id));
+            const url=URL.createObjectURL(new Blob([JSON.stringify(data)],{type:'application/json'}));
+            const link=node('a','');link.href=url;link.download='reader-work-'+row.work_id+'.json';
+            document.body.append(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),10000);
+            note('manage-message','작품 백업 파일을 내려받았습니다. 계정·인증 정보는 포함하지 않습니다.');
+          } catch(e){note('manage-message','백업 실패: '+e.message);} finally {backup.disabled=false;}
+        };
+        const settings=node('form','');settings.className='card';
+        const ahead=node('input','');ahead.type='number';ahead.min=0;ahead.max=20;ahead.step=1;ahead.value=row.prefetch;ahead.required=true;
+        const cap=node('input','');cap.type='number';cap.min=0;cap.max=1024;cap.step=1;cap.value=row.cache_limit_mb;cap.required=true;
+        const aheadLabel=node('label','미리 수집할 다음 회차 수 ');aheadLabel.append(ahead);
+        const capLabel=node('label','본문 저장 한도 (MB) ');capLabel.append(cap);
+        const settingsButton=node('button','수집 설정 저장');
+        settings.append(aheadLabel,node('p',''),capLabel,node('p','현재 회차는 별도로 수집합니다. 미리 수집 0~20회, 저장 한도 0은 제한 없음. 한도에 도달해도 기존 본문은 삭제하지 않습니다. 설정은 새 수집 요청부터 적용되며 이미 대기 중인 작업은 남습니다.'),settingsButton);
+        settings.onsubmit=e=>{e.preventDefault();change(settingsButton,'settings',{settings:{paused:row.paused,prefetch:Number(ahead.value),cache_limit_mb:Number(cap.value)}},'수집 설정을 저장했습니다.');};
+        const remove=node('button','이 작품 전체 삭제');remove.className='danger';
+        remove.onclick=async()=>{
+          if(!confirm(`「${row.title}」 전체 데이터를 삭제할까요?\n읽은 회차·위치, 회차 목록, 저장 본문 ${row.ready}개와 수집 작업을 지웁니다. 다른 기기에도 반영됩니다. 앱에서 되돌릴 수 없습니다.`))return;
+          remove.disabled=true;remove.textContent='삭제 중…';
+          try {
+            await api('manage/delete',{work_id:row.work_id,confirm:true});
+            if(state.workId===row.work_id){state.workId='';state.work=null;state.remote=null;}
+            await manageScreen();note('manage-message',`「${row.title}」 삭제 완료. 다른 기기는 다음 동기화 때 반영됩니다.`);
+          } catch(e){note('manage-message','삭제 실패: '+e.message);remove.disabled=false;remove.textContent='이 작품 전체 삭제';}
+        };
+        actions.append(open,pause,retry,backup,clear,remove);card.append(actions,settings);list.append(card);
+      }
+      note('manage-message',rows.length?rows.length+'개 작품':'관리할 소설 데이터가 없습니다.');
+    } catch(e){note('manage-message',e.message);}
+  }
+  $('manage-open').onclick=manageScreen;$('reader-manage').onclick=manageScreen;
+  $('manage-refresh').onclick=manageScreen;$('manage-back').onclick=library;
+  $('restore-form').onsubmit=async e=>{
+    e.preventDefault();const button=e.submitter;button.disabled=true;
+    try {
+      const file=$('restore-file').files[0];
+      if(!file || file.size>32*1024*1024)throw new Error('32 MB 이하의 백업 파일을 선택하세요.');
+      const backup=JSON.parse(await file.text());
+      if(backup.format!=='reader-work'||backup.version!==1||!backup.work)throw new Error('작품 백업 파일이 아닙니다.');
+      if(!confirm(`「${backup.work.title}」 (작품 ${backup.work.work_id}) 데이터를 복원할까요?\n서버에 같은 작품이 있으면 읽은 위치·목록·본문을 이 파일로 교체합니다. 되돌리려면 현재 데이터를 먼저 백업하세요.`))return;
+      await api('manage/restore',{backup,confirm:true});
+      state.work=null;state.remote=null;$('restore-file').value='';
+      await manageScreen();note('manage-message','복원했습니다. 내용을 확인한 뒤 수집 재개를 누르세요.');
+    } catch(e){note('manage-message','복원 실패: '+e.message);} finally {button.disabled=false;}
+  };
   function loginFields(info) {
     authInfo=info;
     for(const id of ['username','password']) {$(id).classList.toggle('hidden',!info.configured);$(id).required=info.configured;}
@@ -283,9 +455,14 @@
       }
       const job=result.list_job;
       note('work-message',job?.state==='error' ? job.error : !result.work?.host ? '출처를 선택하세요.'
-        : job?.state==='queued'||job?.state==='running' ? '전체 회차 목록 수집 중…'
+        : job?.state==='queued'||job?.state==='running' ? job.error || '전체 회차 목록 수집 중…'
         : result.episodes.length ? result.episodes.length+'개 회차' : '목록을 새로고침하세요.');
       if(desiredEpisode && result.episodes.some(x=>x.episode_id===desiredEpisode)) return openEpisode(desiredEpisode);
+      if(result.paused) {
+        note('work-message','수집이 일시정지되어 있습니다. 저장된 본문은 계속 읽을 수 있습니다.');
+        const manage=node('button','작품 관리');manage.onclick=manageScreen;$('work-message').append(manage);
+        list.querySelector('.current')?.scrollIntoView({block:'center'});return;
+      }
       if(result.verification) {verification('work-message',result.verification,()=>openWork(workId,desiredEpisode));return;}
       if(job?.state==='queued'||job?.state==='running') poll(()=>openWork(workId,desiredEpisode));
       else list.querySelector('.current')?.scrollIntoView({block:'center'});
@@ -305,12 +482,19 @@
       : previous===episodeId ? state.transitionFrom : '';
     state.writable=!state.remote || (!state.remote.deleted && (!state.remote.episode_id || state.remote.episode_id===episodeId || !!state.transitionFrom));
     show('reader'); $('content').replaceChildren(); note('reader-message','본문 불러오는 중…'); scrollTo(0,0);
+    $('current-episode').textContent='회차 확인 중…'; $('current-episode').title='';
+    $('manual-save').disabled=true; $('save-feedback').textContent='';
+    setNavVisible(true);
     history.replaceState({},'', '/app?work='+workId+'&ep='+episodeId);
     try {
       const info=await api('episode/'+workId+'/'+episodeId);
       if(state.episodeId!==episodeId) return;
       const chapter=state.work.episodes.find(x=>x.episode_id===episodeId);
       $('reader-title').textContent=chapter?.title || info.episode.title;
+      const episodeTitle=chapter?.title || info.episode.title || '';
+      const number=episodeTitle.match(/(?:^|\s|제)(\d+(?:\.\d+)?)\s*[화회]/);
+      $('current-episode').textContent=number ? '현재 '+number[1]+'화' : '현재 목록 '+info.episode.ordinal+'번째';
+      $('current-episode').title=episodeTitle;
       const index=state.work.episodes.findIndex(x=>x.episode_id===episodeId);
       $('previous').disabled=index<=0; $('next').disabled=index<0||index>=state.work.episodes.length-1;
       $('previous').onclick=()=>openEpisode(state.work.episodes[index-1].episode_id);
@@ -324,8 +508,10 @@
         const ratio=!state.remote?.deleted && state.remote?.episode_id===episodeId ? Number(state.remote.position)||0 : Number(sessionStorage.getItem('readerPosition:'+workId+':'+episodeId))||0;
         requestAnimationFrame(()=>{
           if(state.workId!==workId || state.episodeId!==episodeId) return;
-          scrollTo(0,ratio*Math.max(0,document.documentElement.scrollHeight-innerHeight));
+          navScrollY=ratio*Math.max(0,document.documentElement.scrollHeight-innerHeight);
+          scrollTo(0,navScrollY);
           state.reading=true;
+          $('manual-save').disabled=state.manualSaving;
           if(state.transitionFrom || !state.remote?.episode_id) savePosition(false);
         });
       } else if(info.episode.state==='locked') {
@@ -333,12 +519,15 @@
         const original=node('a','원본에서 확인'); original.href=info.episode.source_url; content.append(original);
       } else if(info.verification) {
         verification('reader-message',info.verification,()=>openEpisode(episodeId));
+      } else if(info.paused || info.job?.state==='capacity') {
+        note('reader-message',info.paused?'수집이 일시정지되어 있습니다. 작품 관리에서 재개하세요.':info.job.error);
+        const manage=node('button','작품 관리');manage.onclick=manageScreen;content.append(manage);
       } else if(info.episode.state==='error') {
         note('reader-message',info.episode.error || '본문 수집에 실패했습니다.');
         const retry=node('button','다시 시도'); retry.onclick=async()=>{await api('episode/'+workId+'/'+episodeId+'/retry',{});openEpisode(episodeId);}; content.append(retry);
         const original=node('a','원본에서 확인'); original.href=info.episode.source_url; content.append(original);
       } else {
-        note('reader-message','본문 수집 중…'); poll(()=>openEpisode(episodeId));
+        note('reader-message',info.job?.error || '본문 수집 중…'); poll(()=>openEpisode(episodeId));
       }
     } catch(e) {note('reader-message',e.message);}
   }
@@ -355,29 +544,102 @@
     try {
       if(state.workId!==workId || state.episodeId!==episodeId || (!state.writable && !manual)) return;
       if(manual) {
-        const fresh=await api('work/'+workId); state.remote=fresh.progress;
+        const fresh=await api('work/'+workId);
+        if(state.workId!==workId || state.episodeId!==episodeId)return;
+        state.remote=fresh.progress;state.work.progress=fresh.progress;
         if(state.remote && (state.remote.deleted || state.remote.episode_id!==episodeId)
-          && !confirm(state.remote.deleted ? '삭제된 기록을 다시 저장할까요?' : '서버의 다른 회차 기록을 현재 회차로 바꿀까요?')) return;
+          && !confirm(state.remote.deleted ? '삭제된 기록을 다시 저장할까요?' : '서버의 다른 회차 기록을 현재 회차로 바꿀까요?')) {
+          state.writable=false;state.transitionFrom='';return;
+        }
       }
       const payload={work_id:workId,episode_id:episodeId,position:ratio,
         title:state.work.work?.title || '',expected_revision:state.remote?.revision || 0,
         allow_rewind:!!manual,device_id:'web-app'};
-      const saved=await api('progress',payload,keepalive);
-      if(state.workId===workId) {
+      let saved;
+      for(let attempt=0;attempt<2;attempt++) {
+        try {saved=await api('progress',payload,keepalive);break;}
+        catch(e) {
+          if(e.status!==409 || manual || keepalive || attempt===1)throw e;
+          const fresh=await api('work/'+workId);
+          if(state.workId!==workId || state.episodeId!==episodeId)return;
+          const remote=fresh.progress;
+          state.remote=remote;state.work.progress=remote;
+          const current=fresh.episodes.find(x=>x.episode_id===episodeId);
+          const stored=fresh.episodes.find(x=>x.episode_id===remote?.episode_id);
+          const same=remote && remote.episode_id===episodeId;
+          const ahead=current && stored && current.ordinal>stored.ordinal;
+          if(!remote || remote.deleted || (!same && !ahead)) {
+            state.writable=false;state.transitionFrom='';
+            note('reader-message',remote?.deleted
+              ? '서버에서 삭제된 기록입니다. 자동 저장을 멈췄습니다. 다시 저장하려면 저장 버튼을 누르세요.'
+              : current && stored && stored.ordinal>current.ordinal
+                ? '서버에 더 뒤의 회차가 저장되어 있어 자동 저장을 멈췄습니다.'
+                : '서버 기록과 회차 순서를 확인할 수 없어 자동 저장을 멈췄습니다. 저장 버튼으로 확인하세요.');
+            return false;
+          }
+          payload.expected_revision=remote.revision;
+          // The server merges same-episode positions with max(); never force a rewind on retry.
+          payload.allow_rewind=false;
+        }
+      }
+      if(state.workId===workId && state.episodeId===episodeId) {
         state.remote={episode_id:episodeId,position:saved.position,revision:saved.revision};
         state.work.progress=state.remote;
-        if(state.episodeId===episodeId) {state.writable=true; state.transitionFrom=''; if(manual) note('reader-message','서버에 저장했습니다.');}
+        state.writable=true;state.transitionFrom='';note('reader-message',manual?'서버에 저장했습니다.':'');
       }
+      return true;
     } catch(e) {
       if(state.workId===workId && state.episodeId===episodeId) {
-        if(e.status===409) {state.writable=false;state.transitionFrom='';note('reader-message','다른 기기의 최신 기록이 있습니다. 자동 저장을 멈췄습니다.');}
-        else if(manual) note('reader-message','저장 실패: '+e.message);
+        if(e.status===409) note('reader-message','저장 중 서버 기록이 다시 변경되어 이번 저장을 보류했습니다. '+(manual?'저장 버튼을 다시 눌러 확인하세요.':'다시 저장하거나 계속 읽으면 재확인합니다.'));
+        else note('reader-message','저장 확인 실패: '+e.message+' · 다음 저장 때 다시 시도합니다.');
       }
+      return false;
     } finally {finish();}
   }
-  window.addEventListener('scroll',()=>{if($('reader').classList.contains('hidden'))return;clearTimeout(state.save);state.save=setTimeout(()=>savePosition(false),700);},{passive:true});
+  let pageTap=null;
+  document.addEventListener('pointerdown',e=>{
+    pageTap=e.isPrimary && e.button===0 ? {id:e.pointerId,x:e.clientX,y:e.clientY,time:performance.now()} : null;
+  },{passive:true});
+  document.addEventListener('pointermove',e=>{
+    if(pageTap && (e.pointerId!==pageTap.id || Math.hypot(e.clientX-pageTap.x,e.clientY-pageTap.y)>10))pageTap=null;
+  },{passive:true});
+  document.addEventListener('pointercancel',()=>{pageTap=null;},{passive:true});
+  document.addEventListener('click',e=>{
+    const tap=pageTap;pageTap=null;
+    if(!tap || performance.now()-tap.time>600 || !state.reading || $('reader').classList.contains('hidden')
+      || !$('settings').classList.contains('hidden') || e.defaultPrevented || e.button!==0
+      || Math.hypot(e.clientX-tap.x,e.clientY-tap.y)>10
+      || e.target.closest('#reader-nav, a,button,input,select,textarea,label,[contenteditable]')
+      || window.getSelection()?.toString())return;
+    const edge=innerWidth<=600 ? .35 : .15, x=e.clientX/innerWidth;
+    const direction=x<edge ? -1 : x>1-edge ? 1 : 0;
+    if(!direction)return;
+    const height=(window.visualViewport?.height || innerHeight)-$('reader-nav').getBoundingClientRect().height;
+    scrollBy({top:direction*Math.max(1,Math.round(height*.85)),behavior:matchMedia('(prefers-reduced-motion: reduce)').matches?'instant':'smooth'});
+  });
+  window.addEventListener('scroll',()=>{
+    if($('reader').classList.contains('hidden'))return;
+    clearTimeout(state.save);state.save=setTimeout(()=>savePosition(false),700);
+    if(!state.reading || state.manualSaving || performance.now()<navKeepUntil || !$('settings').classList.contains('hidden')){navScrollY=scrollY;return;}
+    const delta=scrollY-navScrollY, atBottom=scrollY+innerHeight>=document.documentElement.scrollHeight-24;
+    if(atBottom || scrollY<=10 || delta < -8)setNavVisible(true);
+    else if(delta>8)setNavVisible(false);
+  },{passive:true});
   window.addEventListener('pagehide',()=>{if(!$('reader').classList.contains('hidden'))savePosition(false,true);});
-  $('manual-save').onclick=()=>savePosition(true);
+  $('manual-save').onclick=async()=>{
+    if(state.manualSaving)return;
+    state.manualSaving=true;
+    setNavVisible(true);
+    const button=$('manual-save'), workId=state.workId, episodeId=state.episodeId;
+    button.disabled=true; button.textContent='저장 중…'; $('save-feedback').textContent='서버에 저장 중…';
+    try {
+      const saved=await savePosition(true);
+      if(state.workId===workId && state.episodeId===episodeId)
+        $('save-feedback').textContent=saved===true?'✓ 서버에 저장했습니다':saved===false?'저장 실패 · 다시 눌러주세요':'저장을 취소했습니다';
+    } catch(e) {
+      if(state.workId===workId && state.episodeId===episodeId)$('save-feedback').textContent='저장 실패 · 다시 눌러주세요';
+    } finally {state.manualSaving=false;navKeepUntil=performance.now()+2500;button.textContent='💾 저장';button.disabled=!state.reading;}
+  };
   $('show-list').onclick=()=>openWork(state.workId);
   $('back-library').onclick=library;
   $('refresh-list').onclick=async()=>{await api('work/'+state.workId+'/refresh',{});openWork(state.workId);};
@@ -386,6 +648,7 @@
   $('logout').onclick=async()=>{await api('logout',{});clearPoll();show('login');};
   async function enter() {
     loginFields(await api('me'));
+    if(location.pathname==='/app/manage') {await manageScreen();return;}
     const pair=new URLSearchParams(location.hash.slice(1)).get('connect');
     if(pair) {await accountScreen();$('pair-code').value=pair; if(authInfo.configured)await findPair(); return;}
     if(location.hash==='#devices') {await accountScreen();return;}

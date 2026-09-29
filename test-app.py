@@ -76,7 +76,7 @@ class ReaderAppTest(unittest.TestCase):
             response = exc
         with response:
             content = response.read()
-            return response.status, (json.loads(content) if content and path != "/app" else content), response.headers
+            return response.status, (json.loads(content) if content and path not in ('/app','/app/manage') else content), response.headers
 
     def login(self):
         status, result, headers = self.request("/app/api/login", {"token": reader_sync.SYNC_TOKEN})
@@ -142,6 +142,11 @@ class ReaderAppTest(unittest.TestCase):
         reader_app.browse_episode = fail_episode
         self.request("/app/api/episode/57458/1")
         self.assertTrue(reader_app.run_one_job(reader_sync.connect))
+        self.assertEqual(self.request("/app/api/episode/57458/1")[1]["episode"]["state"], "missing")
+        for _ in range(3):
+            with reader_sync.connect() as db:
+                db.execute("UPDATE reader_jobs SET updated_at=0 WHERE work_id='57458' AND episode_id='1'")
+            self.assertTrue(reader_app.run_one_job(reader_sync.connect))
         self.assertEqual(self.request("/app/api/episode/57458/1")[1]["episode"]["state"], "error")
         reader_app.browse_episode = lambda *_: ["복구한 본문"]
         self.assertEqual(self.request("/app/api/episode/57458/1/retry", {})[0], 200)
@@ -166,6 +171,315 @@ class ReaderAppTest(unittest.TestCase):
         self.assertEqual((source["work"]["host"], source["list_job"]["state"]), ("newtoki1.org", "queued"))
         self.cookie = "reader_session=forged"
         self.assertEqual(self.request("/app/api/library")[0], 401)
+
+    def test_resource_memory_limits_and_unavailable(self):
+        mib=1024*1024
+        files={'meminfo':'MemTotal: 1048576 kB\nMemAvailable: 786432 kB\nSwapTotal: 524288 kB\nSwapFree: 512000 kB\n',
+               'memory.current':str(800*mib),'memory.max':'max','memory.swap.current':str(12*mib),'memory.swap.max':'max'}
+        def read(path,*args,**kwargs):
+            if path.name not in files:raise FileNotFoundError(path.name)
+            return files[path.name]
+        with patch.object(Path,'read_text',read):
+            memory=reader_app.memory_usage()
+            self.assertEqual((memory['total'],memory['used'],memory['source']),(1024*mib,256*mib,'meminfo'))
+            self.assertEqual((memory['swap_total'],memory['swap_used']),(512*mib,12*mib))
+            self.assertEqual(memory['cache_inclusive'],800*mib)
+            files.update({'memory.max':str(512*mib),'memory.current':str(400*mib),
+                          'memory.swap.max':'0','memory.swap.current':'0'})
+            memory=reader_app.memory_usage()
+            self.assertEqual((memory['total'],memory['used'],memory['available'],memory['source']),(512*mib,400*mib,112*mib,'cgroup'))
+            self.assertEqual((memory['swap_total'],memory['swap_used']),(0,0))
+            files['meminfo']='MemTotal: 1048576 kB\n'
+            files['memory.max']='max'
+            files.pop('memory.swap.current')
+            files.pop('memory.swap.max')
+            memory=reader_app.memory_usage()
+            self.assertIsNone(memory['used'])
+            self.assertIsNone(memory['swap_used'])
+        with patch.object(Path,'read_text',side_effect=PermissionError):
+            memory=reader_app.memory_usage()
+            self.assertIsNone(memory['total'])
+            self.assertIsNone(memory['used'])
+
+    def test_authenticated_resource_snapshot(self):
+        path='/app/api/manage/resources'
+        self.assertEqual(self.request(path,cookie=False)[0],401)
+        self.login()
+        status,info,headers=self.request(path)
+        self.assertEqual(status,200)
+        self.assertEqual(headers['Cache-Control'],'no-store')
+        self.assertGreater(info['sampled_at'],0)
+        self.assertGreater(info['disk']['total'],0)
+        self.assertGreater(info['database']['main'],0)
+        self.assertNotIn(reader_sync.DB_PATH,json.dumps(info),'Do not expose filesystem paths')
+        with reader_sync.connect() as db:
+            db.execute('PRAGMA journal_mode=WAL')
+            db.execute('CREATE TABLE resource_test(data BLOB)')
+            db.execute('INSERT INTO resource_test VALUES(zeroblob(40000))')
+            db.commit()
+            info=reader_app.resource_snapshot(db)
+            self.assertGreater(info['database']['wal'],0)
+            self.assertGreater(info['database']['shm'],0)
+            self.assertEqual(info['database']['total'],sum(info['database'][key] for key in ('main','wal','shm','journal')))
+            db.execute('DELETE FROM resource_test')
+            db.commit()
+            with patch.object(reader_app.shutil,'disk_usage',side_effect=PermissionError):
+                info=reader_app.resource_snapshot(db)
+                self.assertIsNone(info['disk'])
+                self.assertGreater(info['database']['reusable'],0)
+            self.assertEqual(db.execute('SELECT episode_id,position FROM progress').fetchone()[:],('91',.6))
+        with sqlite3.connect(':memory:') as db:
+            info=reader_app.resource_snapshot(db)
+            self.assertIsNone(info['disk'])
+            self.assertIsNone(info['database'])
+
+    def test_manage_collection_controls_and_capacity(self):
+        self.login()
+        self.request('/app/api/work/999/source', {'host':'newtoki1.org'})
+        reader_app.collect_episode_list=lambda *_: ('시험 작품', [(str(i),f'{i}화',f'https://newtoki1.org/novel/999/{i}') for i in range(91,96)])
+        reader_app.run_one_job(reader_sync.connect)
+        endpoint='/app/api/manage/settings'
+        settings={'paused':0,'prefetch':0,'cache_limit_mb':1}
+        for invalid in ({'prefetch':21},{'cache_limit_mb':-1},{'paused':True}):
+            self.assertEqual(self.request(endpoint,{'work_id':'999','settings':invalid})[0],400)
+        self.assertEqual(self.request(endpoint,{'work_id':'999','settings':settings},cookie=False)[0],401)
+        self.assertEqual(self.request(endpoint,{'work_id':'999','settings':settings})[0],200)
+        self.request('/app/api/episode/999/91')
+        with reader_sync.connect() as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM reader_jobs WHERE episode_id!=''").fetchone()[0],1)
+        settings['paused']=1
+        self.request(endpoint,{'work_id':'999','settings':settings})
+        self.assertTrue(self.request('/app/api/episode/999/92')[1]['paused'])
+        self.assertFalse(reader_app.run_one_job(reader_sync.connect))
+        reader_sync.init_db()
+        self.assertEqual(self.request('/app/api/manage')[1]['works'][0]['paused'],1)
+        settings.update(paused=0,prefetch=2)
+        self.request(endpoint,{'work_id':'999','settings':settings})
+        self.request('/app/api/episode/999/91')
+        with reader_sync.connect() as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM reader_jobs WHERE episode_id!=''").fetchone()[0],3)
+            db.execute("DELETE FROM reader_jobs WHERE episode_id IN ('92','93')")
+        reader_app.browse_episode=lambda *_: ['x'*(1024*1024)]
+        self.assertTrue(reader_app.run_one_job(reader_sync.connect))
+        self.assertEqual(self.request('/app/api/episode/999/91')[1]['job']['state'],'capacity')
+        with reader_sync.connect() as db:
+            self.assertEqual(reader_app.cache_bytes(db,'999'),0)
+            db.execute("DELETE FROM reader_jobs WHERE episode_id IN ('92','93')")
+        settings.update(cache_limit_mb=2,prefetch=0)
+        self.request(endpoint,{'work_id':'999','settings':settings})
+        self.assertTrue(reader_app.run_one_job(reader_sync.connect))
+        self.assertEqual(self.request('/app/api/episode/999/91')[1]['episode']['state'],'ready')
+        settings['cache_limit_mb']=1
+        self.request(endpoint,{'work_id':'999','settings':settings})
+        self.request('/app/api/episode/999/92')
+        with patch.object(reader_app,'browse_episode',side_effect=AssertionError('Full cache must not fetch')):
+            self.assertTrue(reader_app.run_one_job(reader_sync.connect))
+        with reader_sync.connect() as db:
+            self.assertGreater(reader_app.cache_bytes(db,'999'),1024*1024,'Lowering limit must not delete stored text')
+            db.execute("UPDATE reader_episodes SET state='error' WHERE episode_id='93'")
+            db.execute("UPDATE reader_episodes SET state='locked' WHERE episode_id='94'")
+            reader_app.enqueue(db,'999','94')
+            db.execute("UPDATE reader_jobs SET state='done' WHERE episode_id='94'")
+            db.execute("UPDATE reader_jobs SET state='error',attempts=4 WHERE episode_id=''")
+        self.assertEqual(self.request('/app/api/manage/retry',{'work_id':'999'})[0],200)
+        with reader_sync.connect() as db:
+            self.assertEqual(db.execute("SELECT state,attempts FROM reader_jobs WHERE episode_id=''").fetchone()[:],('queued',0))
+            self.assertEqual(db.execute("SELECT state FROM reader_episodes WHERE episode_id='93'").fetchone()[0],'missing')
+            self.assertEqual(db.execute("SELECT state FROM reader_episodes WHERE episode_id='94'").fetchone()[0],'locked')
+            self.assertEqual(db.execute("SELECT state FROM reader_jobs WHERE episode_id='92'").fetchone()[0],'capacity')
+
+    def test_manage_backup_restore_and_cache_clear(self):
+        self.login()
+        self.request('/app/api/work/999/source', {'host':'newtoki1.org'})
+        reader_app.collect_episode_list=lambda *_: ('백업 작품', [('91','91화','https://newtoki1.org/novel/999/91')])
+        reader_app.run_one_job(reader_sync.connect)
+        self.request('/app/api/episode/999/91')
+        reader_app.browse_episode=lambda *_: ['백업 본문'*5000]
+        reader_app.run_one_job(reader_sync.connect)
+        url='/app/api/manage/backup?work_id=999'
+        self.assertEqual(self.request(url,cookie=False)[0],401)
+        status, backup, _=self.request(url)
+        self.assertEqual(status,200)
+        self.assertGreater(len(json.dumps(backup)),16384)
+        self.assertEqual(set(backup),{'format','version','work','settings','progress','episodes'})
+        self.assertNotIn('device_id',backup['progress'])
+        restore='/app/api/manage/restore'
+        self.assertEqual(self.request(restore,{'confirm':True},cookie=False)[0],401)
+        self.assertEqual(self.request(restore,{'confirm':True},app_header=False)[0],403)
+        self.assertEqual(self.request(restore,{'backup':backup})[0],400)
+        # Validate the complete file before any row can be changed.
+        invalids=[]
+        for key,value in [('source_url','http://127.0.0.1/novel/999/91'),('ordinal',True),('paragraphs',['ok',{}])]:
+            invalid=json.loads(json.dumps(backup));invalid['episodes'][0][key]=value;invalids.append(invalid)
+        invalid=json.loads(json.dumps(backup));invalid['episodes']*=2;invalids.append(invalid)
+        invalid=json.loads(json.dumps(backup));invalid['progress']['position']=float('nan');invalids.append(invalid)
+        for invalid in invalids:
+            self.assertEqual(self.request(restore,{'backup':invalid,'confirm':True})[0],400)
+            self.assertEqual(self.request(url)[1],backup)
+        before=self.request('/v1/progress?kind=novel&work_id=999',bearer=True)[1]['progress']
+        reader_sync.store_progress({'kind':'webtoon','work_id':'999','episode_id':'2','position':.7})
+        clear='/app/api/manage/cache-clear'
+        self.assertEqual(self.request(clear,{'work_id':'999'})[0],400)
+        self.assertEqual(self.request(clear,{'work_id':'999','confirm':True})[0],200)
+        self.assertEqual(self.request('/v1/progress?kind=novel&work_id=999',bearer=True)[1]['progress'],before)
+        episode=self.request('/app/api/episode/999/91')[1]
+        self.assertEqual((episode['episode']['paragraphs'],episode['paused']),(None,True))
+        self.assertFalse(reader_app.run_one_job(reader_sync.connect))
+        self.assertEqual(self.request(restore,{'backup':backup,'confirm':True})[0],200)
+        restored=self.request(url)[1]
+        self.assertEqual(restored['episodes'],backup['episodes'])
+        self.assertEqual(restored['progress'],backup['progress'])
+        self.assertEqual(restored['settings']['paused'],1)
+        self.assertEqual(self.request('/app/api/me')[1]['authenticated'],True)
+        self.assertEqual(self.request('/v1/progress?kind=webtoon&work_id=999',bearer=True)[1]['progress']['position'],.7)
+        self.assertEqual(reader_sync.store_progress({'kind':'novel','work_id':'999','episode_id':'91','position':.9,'expected_revision':before['revision']})[0],409)
+        # Restoring a work without a saved position must leave it visible and readable.
+        backup['progress']=None
+        self.assertEqual(self.request(restore,{'backup':backup,'confirm':True})[0],200)
+        self.assertIn('999',[x['work_id'] for x in self.request('/app/api/library')[1]['works']])
+        self.assertIsNone(self.request(url)[1]['progress'])
+
+    def test_cache_clear_and_restore_discard_inflight_result(self):
+        self.login()
+        self.request('/app/api/work/999/source',{'host':'newtoki1.org'})
+        reader_app.collect_episode_list=lambda *_: ('원본', [('91','91화','https://newtoki1.org/novel/999/91')])
+        reader_app.run_one_job(reader_sync.connect)
+        backup=self.request('/app/api/manage/backup?work_id=999')[1]
+        for action in ('cache-clear','restore'):
+            with self.subTest(action=action):
+                self.request('/app/api/manage/settings',{'work_id':'999','settings':{'paused':0}})
+                self.request('/app/api/episode/999/91')
+                def fetched(*_):
+                    payload={'work_id':'999','confirm':True} if action=='cache-clear' else {'backup':backup,'confirm':True}
+                    self.assertEqual(self.request('/app/api/manage/'+action,payload)[0],200)
+                    return ['늦게 도착한 본문']
+                reader_app.browse_episode=fetched
+                self.assertTrue(reader_app.run_one_job(reader_sync.connect))
+                self.assertIsNone(self.request('/app/api/episode/999/91')[1]['episode']['paragraphs'])
+
+    def test_manage_delete_preserves_other_works_and_sync_tombstone(self):
+        self.assertEqual(self.request('/app/manage', cookie=False)[0], 200)
+        self.assertEqual(self.request('/app/api/manage', cookie=False)[0], 401)
+        body={'work_id':'999','confirm':True}
+        self.assertEqual(self.request('/app/api/manage/delete',body,cookie=False)[0],401)
+        self.login()
+        self.assertEqual(self.request('/app/api/manage/delete',body,app_header=False)[0],403)
+        self.assertEqual(self.request('/app/api/manage/delete',{'work_id':'999'})[0],400)
+        self.assertEqual(self.request('/app/api/manage/delete',{'work_id':'../999','confirm':True})[0],400)
+        with reader_sync.connect() as db:
+            db.execute("INSERT INTO reader_works VALUES('999','newtoki1.org','관리 시험',1)")
+            db.execute("INSERT INTO reader_works VALUES('888','newtoki1.org','보존 작품',1)")
+            db.execute("""INSERT INTO reader_episodes(work_id,episode_id,ordinal,title,source_url,paragraphs_json,state,updated_at)
+                VALUES('999','91',1,'91화','https://newtoki1.org/novel/999/91','[\"cached\"]','ready',1)""")
+            reader_app.enqueue(db,'999','92')
+            reader_app.enqueue(db,'888')
+        reader_sync.store_progress({'kind':'webtoon','work_id':'999','episode_id':'1','position':.3})
+        rows=self.request('/app/api/manage')[1]['works']
+        row=next(x for x in rows if x['work_id']=='999')
+        self.assertEqual((row['episode_title'],row['position'],row['ready'],row['pending']),('91화',.6,1,1))
+        self.assertGreater(row['bytes'],0)
+        self.assertEqual(self.request('/app/api/manage/delete',body)[0],200)
+        self.assertEqual([x['work_id'] for x in self.request('/app/api/manage')[1]['works']],['888'])
+        with reader_sync.connect() as db:
+            for table in ('reader_works','reader_episodes','reader_jobs'):
+                self.assertEqual(db.execute(f'SELECT count(*) FROM {table} WHERE work_id=?',('999',)).fetchone()[0],0)
+            tomb=db.execute("SELECT * FROM progress WHERE kind='novel' AND work_id='999'").fetchone()
+            self.assertEqual((tomb['deleted'],tomb['episode_id'],tomb['title'],tomb['position'],tomb['device_id']),(1,'','',0,''))
+            self.assertEqual(db.execute("SELECT deleted FROM progress WHERE kind='webtoon' AND work_id='999'").fetchone()[0],0)
+            self.assertEqual(db.execute("SELECT count(*) FROM reader_jobs WHERE work_id='888'").fetchone()[0],1)
+        rows=self.request('/v1/progress?include_deleted=1',bearer=True)[1]['progress']
+        self.assertTrue(any(x['kind']=='novel' and x['work_id']=='999' and x['deleted'] for x in rows))
+        self.assertEqual(reader_sync.store_progress({'kind':'novel','work_id':'999','episode_id':'91','position':.7,'expected_revision':1})[0],409)
+        self.assertEqual(self.request('/app/api/manage/delete',body)[0],200)
+        self.assertTrue(self.request('/app/api/me')[1]['authenticated'])
+
+    def test_deleted_work_cannot_be_resurrected_by_inflight_job(self):
+        self.login()
+        for job_kind in ('list','episode'):
+            for outcome in ('success','failure','verification','locked'):
+                with self.subTest(job=job_kind,outcome=outcome):
+                    with reader_sync.connect() as db:
+                        db.execute("INSERT INTO reader_works VALUES('777','newtoki1.org','옛 데이터',1)")
+                        if job_kind=='episode':
+                            db.execute("INSERT INTO reader_episodes(work_id,episode_id,ordinal,title,source_url,updated_at) VALUES('777','1',1,'1화','https://newtoki1.org/novel/777/1',1)")
+                        reader_app.enqueue(db,'777','1' if job_kind=='episode' else '')
+                    def finish_after_delete(*args):
+                        self.assertEqual(self.request('/app/api/manage/delete',{'work_id':'777','confirm':True})[0],200)
+                        # Re-add the exact same work before the stale network response returns.
+                        self.assertEqual(self.request('/app/api/works',{'url':'https://newtoki1.org/novel/777'})[0],200)
+                        if outcome=='failure': raise TimeoutError('late failure')
+                        if outcome=='verification': raise reader_crawl.HumanVerificationRequired()
+                        if outcome=='locked': raise LockedChapter('late locked page')
+                        return ('옛 데이터',[('1','1화','https://newtoki1.org/novel/777/1')]) if job_kind=='list' else ['옛 본문']
+                    reader_app.collect_episode_list=finish_after_delete
+                    reader_app.browse_episode=finish_after_delete
+                    self.assertTrue(reader_app.run_one_job(reader_sync.connect))
+                    with reader_sync.connect() as db:
+                        self.assertEqual(db.execute("SELECT count(*) FROM reader_episodes WHERE work_id='777'").fetchone()[0],0)
+                        self.assertEqual(tuple(db.execute("SELECT state,attempts,run_token FROM reader_jobs WHERE work_id='777'").fetchone()),('queued',0,''))
+                        self.assertEqual(db.execute('SELECT count(*) FROM reader_paused_sources').fetchone()[0],0)
+                    self.assertEqual(self.request('/app/api/manage/delete',{'work_id':'777','confirm':True})[0],200)
+
+    def test_existing_jobs_survive_run_token_migration(self):
+        with reader_sync.connect() as db:
+            db.execute('DROP TABLE reader_jobs')
+            db.execute("""CREATE TABLE reader_jobs(work_id TEXT NOT NULL,episode_id TEXT NOT NULL,
+                state TEXT NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,error TEXT NOT NULL DEFAULT '',
+                updated_at INTEGER NOT NULL,PRIMARY KEY(work_id,episode_id))""")
+            db.execute("INSERT INTO reader_jobs VALUES('8','1','queued',2,'retry pending',9999999)")
+        reader_sync.init_db()
+        reader_sync.init_db()
+        with reader_sync.connect() as db:
+            self.assertEqual(tuple(db.execute('SELECT * FROM reader_jobs').fetchone()),('8','1','queued',2,'retry pending',9999999,''))
+
+    def test_delayed_retries_are_bounded_and_persisted(self):
+        self.login()
+        with reader_sync.connect() as db:
+            db.execute("INSERT INTO reader_works VALUES('8','newtoki1.org','시험',1)")
+            db.execute("INSERT INTO reader_episodes(work_id,episode_id,ordinal,title,source_url,updated_at) VALUES('8','1',1,'1화','https://newtoki1.org/novel/8/1',1)")
+            db.execute("INSERT INTO reader_jobs(work_id,episode_id,state,updated_at) VALUES('8','1','queued',1)")
+        reader_app.browse_episode = Mock(side_effect=TimeoutError('temporary failure'))
+        clock = 1000
+        for attempt in range(1, 5):
+            with patch.object(reader_app.time, 'time', return_value=clock):
+                self.assertTrue(reader_app.run_one_job(reader_sync.connect))
+                self.assertFalse(reader_app.run_one_job(reader_sync.connect))
+                reader_sync.init_db()  # Restart/init must not reset the retry budget or due time.
+                self.assertFalse(reader_app.run_one_job(reader_sync.connect))
+            with reader_sync.connect() as db:
+                row = db.execute("SELECT * FROM reader_jobs WHERE work_id='8'").fetchone()
+                self.assertEqual(row['attempts'], attempt)
+                self.assertEqual(row['state'], 'queued' if attempt < 4 else 'error')
+                self.assertEqual(row['updated_at'], (clock + 5 * attempt if attempt < 4 else clock) * 1000)
+                if attempt < 4:
+                    reader_app.queue_prefetch(db, '8', '1')
+                    self.assertEqual(db.execute("SELECT updated_at FROM reader_jobs WHERE work_id='8'").fetchone()[0], row['updated_at'])
+            clock += 5 * attempt
+        self.assertEqual(reader_app.browse_episode.call_count, 4)
+        self.assertFalse(reader_app.run_one_job(reader_sync.connect))
+        self.assertEqual(self.request('/app/api/episode/8/1/retry', {})[0], 200)
+        reader_app.browse_episode = Mock(return_value=['복구 본문'])
+        self.assertTrue(reader_app.run_one_job(reader_sync.connect))
+        with reader_sync.connect() as db:
+            self.assertEqual(tuple(db.execute("SELECT state,attempts FROM reader_jobs WHERE work_id='8'").fetchone()), ('done', 1))
+            reader_app.enqueue(db, '8', force=True)
+        reader_app.collect_episode_list = Mock(side_effect=TimeoutError('list failure'))
+        self.assertTrue(reader_app.run_one_job(reader_sync.connect))
+        self.assertEqual(self.request('/app/api/work/8')[1]['list_job']['state'], 'queued')
+        self.assertFalse(reader_app.run_one_job(reader_sync.connect))
+
+    def test_worker_waits_after_each_job(self):
+        class StopLoop(BaseException):
+            pass
+        for result in (True, False):
+            with patch.object(reader_app.threading, 'Thread') as thread, \
+                    patch.object(reader_app, 'run_one_job', return_value=result) as run, \
+                    patch.object(reader_app.time, 'sleep', side_effect=StopLoop) as sleep:
+                reader_app.start_worker(reader_sync.connect)
+                with self.assertRaises(StopLoop):
+                    thread.call_args.kwargs['target']()
+                run.assert_called_once_with(reader_sync.connect)
+                sleep.assert_called_once_with(1)
 
     def test_list_parser_and_url_boundary(self):
         html = """<title>작품 - 사이트</title>
@@ -393,6 +707,107 @@ class ReaderAppTest(unittest.TestCase):
             pass
         self.assertEqual(order, ['30', '20', '10'])
 
+    def test_browser_progress_conflict_reconciliation(self):
+        try:
+            from playwright.sync_api import expect, sync_playwright
+        except ImportError:
+            self.skipTest('Playwright is not installed')
+        executable=os.environ.get('READER_TEST_BROWSER') or r'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe'
+        if not Path(executable).exists():
+            self.skipTest('A local Chromium browser is not available')
+        self.login()
+        with sync_playwright() as playwright:
+            browser=playwright.chromium.launch(headless=True,executable_path=executable)
+            try:
+                for index,case in enumerate(('same','same-farther','ahead','server-ahead','deleted','unknown','repeated','manual-cancel')):
+                    with self.subTest(case=case):
+                        work_id=str(7000+index)
+                        with reader_sync.connect() as db:
+                            db.execute('INSERT INTO reader_works VALUES(?,?,?,0)',(work_id,'newtoki1.org','충돌 시험'))
+                            for ordinal,eid in enumerate(('900','20','100'),1):
+                                db.execute('''INSERT INTO reader_episodes
+                                    (work_id,episode_id,ordinal,title,source_url,paragraphs_json,state,updated_at)
+                                    VALUES(?,?,?,?,?,?,'ready',0)''', (work_id,eid,ordinal,f'{ordinal}화',
+                                    f'https://newtoki1.org/novel/{work_id}/{eid}',json.dumps(['시험 문단입니다. '*8]*100)))
+                        def progress():
+                            return self.request(f'/v1/progress?kind=novel&work_id={work_id}&include_deleted=1',bearer=True)[1]['progress']
+                        def update(eid,position):
+                            current=progress()
+                            status,_=reader_sync.store_progress(dict(kind='novel',work_id=work_id,episode_id=eid,
+                                position=position,title='충돌 시험',expected_revision=current['revision'] if current else 0,allow_rewind=True))
+                            self.assertEqual(status,200)
+                        update('20',.2)
+                        page=browser.new_page(viewport={'width':390,'height':800})
+                        page.goto(self.base+f'/app?work={work_id}&ep=20')
+                        page.locator('#token').fill(reader_sync.SYNC_TOKEN)
+                        page.locator('#login-form button').click()
+                        page.locator('#content p').first.wait_for()
+                        page.wait_for_timeout(1000)  # Finish the initial position-restoration autosave.
+                        writes=[]
+                        page.on('response',lambda response: writes.append(response.status) if response.url.endswith('/app/api/progress') else None)
+                        if case=='manual-cancel':
+                            update('100',.8)
+                            page.once('dialog',lambda dialog: dialog.dismiss())
+                            page.locator('#manual-save').click()
+                            expect(page.locator('#save-feedback')).to_have_text('저장을 취소했습니다')
+                            before=progress()
+                            page.evaluate('scrollTo(0,(document.documentElement.scrollHeight-innerHeight)*.4)')
+                            page.wait_for_timeout(900)
+                            self.assertEqual(progress(),before,'Declining manual overwrite must also prevent subsequent autosave rewind')
+                            self.assertEqual(writes,[])
+                            page.close()
+                            continue
+                        if case=='deleted':
+                            with reader_sync.connect() as db:
+                                reader_sync.delete_progress(db,'novel',work_id,clear=True)
+                        elif case=='repeated':
+                            attempts=[]
+                            def race(route):
+                                attempts.append(1)
+                                update('20',.3 if len(attempts)==1 else .6)
+                                route.continue_()
+                            page.route('**/app/api/progress',race)
+                        else:
+                            update({'same':'20','same-farther':'20','ahead':'900','server-ahead':'100','unknown':'9999'}[case],.3 if case=='same-farther' else .8)
+                        page.evaluate('scrollTo(0,(document.documentElement.scrollHeight-innerHeight)*.4)')
+                        if case in ('same','same-farther','ahead'):
+                            for _ in range(60):
+                                if len(writes)>=2:break
+                                page.wait_for_timeout(50)
+                            self.assertEqual(writes,[409,200])
+                            current=progress()
+                            self.assertEqual(current['episode_id'],'20')
+                            self.assertAlmostEqual(current['position'],.8 if case=='same' else .4,delta=.01)
+                            expect(page.locator('#reader-message')).to_have_text('')
+                        elif case=='repeated':
+                            expect(page.locator('#reader-message')).to_contain_text('이번 저장을 보류')
+                            self.assertEqual(len(attempts),2,'A save must retry at most once')
+                            page.unroute('**/app/api/progress')
+                        else:
+                            expected={'server-ahead':'더 뒤의 회차','deleted':'서버에서 삭제된','unknown':'회차 순서를 확인할 수 없어'}[case]
+                            expect(page.locator('#reader-message')).to_contain_text(expected)
+                            self.assertEqual(writes,[409])
+                            before=progress()
+                            page.evaluate('scrollTo(0,(document.documentElement.scrollHeight-innerHeight)*.9)')
+                            page.wait_for_timeout(900)
+                            self.assertEqual(progress(),before,'Unsafe remote progress must be preserved')
+                            self.assertEqual(writes,[409])
+                            if case=='server-ahead':
+                                page.locator('#show-nav').click()
+                                page.once('dialog',lambda dialog: dialog.accept())
+                                page.locator('#manual-save').click()
+                                expect(page.locator('#save-feedback')).to_contain_text('서버에 저장했습니다')
+                                self.assertEqual(progress()['episode_id'],'20','Explicit manual rewind must still work')
+                        if case in ('same','same-farther','ahead','repeated'):
+                            page.evaluate('scrollTo(0,(document.documentElement.scrollHeight-innerHeight)*.9)')
+                            for _ in range(60):
+                                if progress()['position']>.89:break
+                                page.wait_for_timeout(50)
+                            self.assertGreater(progress()['position'],.89,'Autosave must continue after reconciliation or bounded retry')
+                        page.close()
+            finally:
+                browser.close()
+
     def test_browser_reader(self):
         try:
             from playwright.sync_api import expect, sync_playwright
@@ -414,7 +829,7 @@ class ReaderAppTest(unittest.TestCase):
                        (json.dumps(["다음 회차 본문"], ensure_ascii=False),))
             db.execute("""INSERT INTO reader_episodes
                 (work_id,episode_id,ordinal,title,source_url,paragraphs_json,state,error,updated_at)
-                VALUES('999','93',3,'93화','https://newtoki1.org/novel/999/93',NULL,'error','수집 실패',1)""")
+                VALUES('999','93',3,'숫자가 없는 제목','https://newtoki1.org/novel/999/93',NULL,'error','수집 실패',1)""")
             db.execute("""INSERT INTO reader_episodes
                 (work_id,episode_id,ordinal,title,source_url,paragraphs_json,state,error,updated_at)
                 VALUES('999','94',4,'94화','https://newtoki1.org/novel/999/94',NULL,'locked','포인트 필요',1)""")
@@ -471,6 +886,7 @@ class ReaderAppTest(unittest.TestCase):
                 expect(page.locator("#work-title")).to_have_text("기존 작품")
                 page.locator("#content p").first.wait_for(timeout=5000)
                 self.assertEqual(page.locator("#content p").count(), 2)
+                expect(page.locator('#current-episode')).to_have_text('현재 91화')
                 self.assertFalse(page.locator("#login").is_visible())
                 page.locator("#show-settings").click()
                 page.locator("[data-theme=paper]").click()
@@ -481,6 +897,7 @@ class ReaderAppTest(unittest.TestCase):
                 page.locator("#next").click()
                 page.locator("#content p").first.wait_for(timeout=5000)
                 expect(page.locator("#content p").first).to_have_text("다음 회차 본문", timeout=5000)
+                expect(page.locator('#current-episode')).to_have_text('현재 92화')
                 for _ in range(50):
                     if self.request("/v1/progress?kind=novel&work_id=999", bearer=True)[1]["progress"]["episode_id"] == "92":
                         break
@@ -502,13 +919,14 @@ class ReaderAppTest(unittest.TestCase):
                         break
                     time.sleep(0.1)
                 self.assertEqual(progress["episode_id"], "1")
-                direct = browser.new_page(viewport={"width": 390, "height": 800})
+                direct = browser.new_page(viewport={"width": 390, "height": 800}, has_touch=True)
                 direct.goto(self.base + "/app?work=999&ep=92")
                 direct.locator("#token").fill(reader_sync.SYNC_TOKEN)
                 direct.locator("#login-form button").click()
                 expect(direct.locator("#content p").first).to_have_text("다음 회차 본문", timeout=5000)
                 direct.locator("#next").click()
                 expect(direct.locator("#reader-message")).to_have_text("수집 실패", timeout=5000)
+                expect(direct.locator('#current-episode')).to_have_text('현재 목록 3번째')
                 self.assertEqual(direct.locator("#content a").get_attribute("href"),
                                  "https://newtoki1.org/novel/999/93")
                 direct.locator("#next").click()
@@ -528,7 +946,68 @@ class ReaderAppTest(unittest.TestCase):
                         break
                     time.sleep(0.1)
                 self.assertTrue(0.45 < ratio < 0.65, f"restored ratio: {ratio}")
+                direct.emulate_media(reduced_motion='reduce')
+                for width in (390, 1280):
+                    direct.set_viewport_size({'width':width, 'height':800})
+                    direct.evaluate('scrollTo(0,2000)')
+                    direct.evaluate('() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
+                    start = direct.evaluate('scrollY')
+                    step = direct.evaluate("Math.round((innerHeight-document.querySelector('#reader-nav').getBoundingClientRect().height)*.85)")
+                    direct.mouse.click(width-8, 300)
+                    direct.wait_for_function('y => scrollY > y', arg=start)
+                    self.assertAlmostEqual(direct.evaluate('scrollY'), start+step, delta=2)
+                    expect(direct.locator('#reader-nav')).to_be_hidden()
+                    expect(direct.locator('#show-nav')).to_be_visible()
+                    direct.mouse.click(8, 300)
+                    self.assertAlmostEqual(direct.evaluate('scrollY'), start, delta=2)
+                    expect(direct.locator('#reader-nav')).to_be_visible()
+                    direct.mouse.click(width/2, 300)
+                    self.assertAlmostEqual(direct.evaluate('scrollY'), start, delta=2)
+                    direct.mouse.move(8,300)
+                    direct.mouse.down()
+                    direct.mouse.move(8,380,steps=5)
+                    direct.mouse.up()
+                    self.assertAlmostEqual(direct.evaluate('scrollY'), start, delta=2, msg='Drag must not page-scroll')
+                    direct.locator('#show-settings').click()
+                    direct.mouse.click(8,300)
+                    self.assertAlmostEqual(direct.evaluate('scrollY'), start, delta=2)
+                    direct.locator('#close-settings').click()
+                    direct.locator('#hide-nav').click()
+                    expect(direct.locator('#reader-nav')).to_be_hidden()
+                    direct.locator('#show-nav').click()
+                    expect(direct.locator('#reader-nav')).to_be_visible()
+                    direct.evaluate('getSelection().removeAllRanges()')
+                    self.assertEqual(direct.evaluate('document.documentElement.scrollWidth<=innerWidth'), True)
+                direct.set_viewport_size({'width':390, 'height':800})
+                direct.evaluate('() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
+                start=direct.evaluate('scrollY')
+                direct.touchscreen.tap(382,300)
+                direct.wait_for_function('y => scrollY>y',arg=start)
+                expect(direct.locator('#reader-nav')).to_be_hidden()
+                direct.locator('#show-nav').click()
+                direct.wait_for_timeout(850)  # Finish scroll autosaves before the manual-save probe.
+                pending_saves=[]
+                direct.route('**/app/api/progress', lambda route: pending_saves.append(route))
+                direct.locator('#manual-save').click()
+                expect(direct.locator('#manual-save')).to_be_disabled()
+                expect(direct.locator('#manual-save')).to_have_text('저장 중…')
+                expect(direct.locator('#save-feedback')).to_have_text('서버에 저장 중…')
+                for _ in range(30):
+                    if pending_saves: break
+                    direct.wait_for_timeout(50)
+                self.assertEqual(len(pending_saves), 1)
+                pending_saves.pop().continue_()
+                expect(direct.locator('#save-feedback')).to_have_text('✓ 서버에 저장했습니다')
+                expect(direct.locator('#manual-save')).to_be_enabled()
+                direct.unroute('**/app/api/progress')
+                direct.route('**/app/api/progress', lambda route: route.fulfill(status=503,content_type='application/json',body='{"error":"test failure"}'))
+                direct.locator('#manual-save').click()
+                expect(direct.locator('#save-feedback')).to_have_text('저장 실패 · 다시 눌러주세요')
+                expect(direct.locator('#manual-save')).to_be_enabled()
+                direct.unroute('**/app/api/progress')
                 direct.mouse.wheel(0, 30000)
+                expect(direct.locator('#reader-nav')).to_be_visible()
+                self.assertIn('work=2000&ep=1',direct.url, 'Bottom scrolling must not change episode')
                 for _ in range(50):
                     advanced = self.request("/v1/progress?kind=novel&work_id=2000", bearer=True)[1]["progress"]
                     if advanced["position"] > 0.95:
@@ -626,6 +1105,97 @@ class ReaderAppTest(unittest.TestCase):
                 expect(direct.locator("#reader-message")).to_have_text("수집 실패")
                 with reader_sync.connect() as db:
                     self.assertEqual(db.execute("SELECT count(*) FROM reader_paused_sources").fetchone()[0], 0)
+                direct.locator('#show-settings').click()
+                direct.locator('#reader-manage').click()
+                expect(direct.locator('#manage')).to_be_visible()
+                self.assertTrue(direct.url.endswith('/app/manage'))
+                expect(direct.locator('#resources-status')).to_contain_text('최근 확인')
+                expect(direct.locator('#resource-db')).to_contain_text('본체')
+                expect(direct.locator('#resource-disk')).to_contain_text('사용')
+                direct.route('**/app/api/manage/resources',lambda route: route.fulfill(status=503,content_type='application/json',body='{"error":"temporary unavailable"}'))
+                direct.locator('#resources-refresh').click()
+                expect(direct.locator('#resources-status')).to_contain_text('갱신 실패')
+                direct.unroute('**/app/api/manage/resources')
+                direct.locator('#resources-refresh').click()
+                expect(direct.locator('#resources-status')).to_contain_text('최근 확인')
+                card=direct.locator('#manage-list [data-work-id="999"]')
+                expect(card).to_contain_text('본문 저장 3개')
+                expect(card).to_contain_text('읽은 위치:')
+                card.get_by_label('미리 수집할 다음 회차 수').fill('1')
+                card.get_by_label('본문 저장 한도 (MB)').fill('8')
+                card.get_by_role('button',name='수집 설정 저장').click()
+                expect(direct.locator('#manage-message')).to_have_text('수집 설정을 저장했습니다.')
+                expect(card.get_by_label('미리 수집할 다음 회차 수')).to_have_value('1')
+                card.get_by_role('button',name='수집 일시정지',exact=True).click()
+                expect(card.get_by_role('button',name='수집 재개',exact=True)).to_be_visible()
+                card.get_by_role('button',name='실패 작업 재시도').click()
+                expect(direct.locator('#manage-message')).to_contain_text('재시도 대열')
+                expect(card.get_by_role('button',name='실패 작업 재시도')).to_be_disabled()
+                with direct.expect_download() as download_info:
+                    card.get_by_role('button',name='작품 백업',exact=True).click()
+                backup_bytes=Path(download_info.value.path()).read_bytes()
+                backup=json.loads(backup_bytes)
+                self.assertEqual(backup['work']['work_id'],'999')
+                self.assertNotIn('credentials',backup)
+                direct.once('dialog',lambda dialog: dialog.dismiss())
+                card.get_by_role('button',name='본문만 삭제').click()
+                expect(card).to_contain_text('본문 저장 3개')
+                direct.once('dialog',lambda dialog: dialog.accept())
+                card.get_by_role('button',name='본문만 삭제').click()
+                expect(card).to_contain_text('본문 저장 0개')
+                expect(card).to_contain_text('읽은 위치:')
+                direct.locator('#manage summary').click()
+                direct.locator('#restore-file').set_input_files({'name':'work.json','mimeType':'application/json','buffer':backup_bytes})
+                direct.once('dialog',lambda dialog: dialog.accept())
+                direct.locator('#restore-form button').click()
+                expect(direct.locator('#manage-message')).to_contain_text('복원했습니다.')
+                expect(card).to_contain_text('본문 저장 3개')
+                expect(card.get_by_role('button',name='수집 재개',exact=True)).to_be_visible()
+                card.get_by_role('button',name='수집 재개',exact=True).click()
+                expect(card.get_by_role('button',name='수집 일시정지',exact=True)).to_be_visible()
+                for width in (390,1280):
+                    direct.set_viewport_size({'width':width,'height':800})
+                    self.assertTrue(direct.evaluate('document.documentElement.scrollWidth<=innerWidth'))
+                direct.set_viewport_size({'width':390,'height':800})
+                direct.once('dialog',lambda dialog: dialog.dismiss())
+                card.get_by_role('button',name='이 작품 전체 삭제').click()
+                expect(card).to_have_count(1)
+                direct.once('dialog',lambda dialog: dialog.accept())
+                card.get_by_role('button',name='이 작품 전체 삭제').click()
+                expect(card).to_have_count(0)
+                expect(direct.locator('#manage-message')).to_contain_text('삭제 완료')
+                expect(direct.locator('#manage-list [data-work-id="2000"]')).to_have_count(1)
+                self.assertTrue(direct.evaluate('document.documentElement.scrollWidth<=innerWidth'))
+                direct.reload()
+                expect(direct.locator('#manage')).to_be_visible()
+                expect(direct.locator('#manage-list [data-work-id="999"]')).to_have_count(0)
+                direct.locator('#manage-back').click()
+                direct.locator('#manage-open').click()
+                expect(direct.locator('#manage')).to_be_visible()
+                # Exercise the refresh lifecycle without waiting for real 10-second intervals.
+                resource_requests=[]
+                direct.on('request',lambda req: resource_requests.append(req.url) if req.url.endswith('/app/api/manage/resources') else None)
+                direct.clock.install()
+                with direct.expect_response('**/app/api/manage/resources'):
+                    direct.locator('#resources-refresh').click()
+                expect(direct.locator('#resources-refresh')).to_be_enabled()
+                count=len(resource_requests)
+                with direct.expect_response('**/app/api/manage/resources'):
+                    direct.clock.fast_forward(10001)
+                expect(direct.locator('#resources-refresh')).to_be_enabled()
+                self.assertEqual(len(resource_requests),count+1)
+                direct.locator('#manage-back').click()
+                count=len(resource_requests)
+                direct.clock.fast_forward(30000)
+                self.assertEqual(len(resource_requests),count,'Do not poll outside management')
+                with direct.expect_response('**/app/api/manage/resources'):
+                    direct.locator('#manage-open').click()
+                direct.evaluate("Object.defineProperty(document,'hidden',{configurable:true,value:true});document.dispatchEvent(new Event('visibilitychange'))")
+                count=len(resource_requests)
+                direct.clock.fast_forward(30000)
+                self.assertEqual(len(resource_requests),count,'Do not poll background pages')
+                with direct.expect_response('**/app/api/manage/resources'):
+                    direct.evaluate("Object.defineProperty(document,'hidden',{configurable:true,value:false});document.dispatchEvent(new Event('visibilitychange'))")
             finally:
                 browser.close()
 
