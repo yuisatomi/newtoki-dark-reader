@@ -13,7 +13,7 @@ _support = importlib.import_module('test-app')
 import reader_auth
 import reader_sync
 
-PASSWORD = 'reading-test-password-2026'
+PASSWORD = 'abcdef'  # Exactly six lowercase characters; test databases only.
 
 
 class AccountTest(unittest.TestCase):
@@ -152,8 +152,9 @@ class AccountTest(unittest.TestCase):
         self.assertFalse(self.request('/app/api/me')[1]['authenticated'])
         with self.assertRaises(ValueError):
             reader_auth.set_password(reader_sync.connect, 'reader', 'short', reset=True)
-        self.assertFalse(reader_auth.valid_password('a' * 14))
-        self.assertTrue(reader_auth.valid_password('가' * 15))
+        self.assertFalse(reader_auth.valid_password('a' * 5))
+        self.assertTrue(reader_auth.valid_password('가' * 6))
+        self.assertTrue(reader_auth.valid_password('a' * 256))
         self.assertFalse(reader_auth.valid_password('a' * 257))
 
     def test_browser_password_and_device_approval(self):

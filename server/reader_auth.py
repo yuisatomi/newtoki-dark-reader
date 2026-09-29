@@ -56,7 +56,7 @@ def limited(connect, bucket, maximum):
 
 
 def valid_password(password):
-    return isinstance(password, str) and 15 <= len(password) <= 256
+    return isinstance(password, str) and 6 <= len(password) <= 256
 
 
 def password_matches(row, password):
@@ -70,7 +70,7 @@ def set_password(connect, username, password, previous=None, reset=False):
     if not isinstance(username, str) or not re.fullmatch(r'[A-Za-z0-9_.-]{3,64}', username):
         raise ValueError('아이디는 영문·숫자·밑줄·점·하이픈 3~64자로 입력하세요.')
     if not valid_password(password):
-        raise ValueError('비밀번호는 15~256자로 입력하세요.')
+        raise ValueError('비밀번호는 6~256자로 입력하세요.')
     salt = secrets.token_hex(16)
     hashed = hashlib.pbkdf2_hmac('sha256', password.encode(), bytes.fromhex(salt), PASSWORD_ROUNDS).hex()
     with connect() as db:

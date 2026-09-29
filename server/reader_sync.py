@@ -307,7 +307,7 @@ if __name__ == "__main__":
         from getpass import getpass
         init_db()
         username = input('Owner username: ').strip()
-        password = getpass('New password (15+ characters): ')
+        password = getpass('New password (6+ characters): ')
         if password != getpass('Confirm password: '):
             raise SystemExit('Passwords do not match')
         reader_auth.set_password(connect, username, password, reset=True)

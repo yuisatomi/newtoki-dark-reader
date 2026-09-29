@@ -90,9 +90,9 @@
     <form id="account-form">
       <p><label>아이디 <input id="account-username" autocomplete="username" required pattern="[A-Za-z0-9_.-]{3,64}" maxlength="64"></label></p>
       <p id="current-password-row"><label>현재 비밀번호 <input id="current-password" type="password" autocomplete="current-password"></label></p>
-      <p><label>새 비밀번호 <input id="new-password" type="password" autocomplete="new-password" minlength="15" maxlength="256" required></label></p>
+      <p><label>새 비밀번호 <input id="new-password" type="password" autocomplete="new-password" minlength="6" maxlength="256" required></label></p>
       <p><label>새 비밀번호 확인 <input id="confirm-password" type="password" autocomplete="new-password" required></label></p>
-      <p class="muted">15자 이상. 변경하면 다른 브라우저와 연결된 스크립트는 다시 로그인·연결해야 합니다. 기존 공통 토큰은 호환용으로 유지됩니다.</p>
+      <p class="muted">6자 이상, 문자 조합 제한 없음. 변경하면 다른 브라우저와 연결된 스크립트는 다시 로그인·연결해야 합니다. 기존 공통 토큰은 호환용으로 유지됩니다.</p>
       <button class="primary">계정 저장</button>
     </form>
     <p class="message" id="account-message"></p>
