@@ -324,12 +324,12 @@
           } catch(e){note('manage-message','백업 실패: '+e.message);} finally {backup.disabled=false;}
         };
         const settings=node('form','');settings.className='card';
-        const ahead=node('input','');ahead.type='number';ahead.min=0;ahead.max=20;ahead.step=1;ahead.value=row.prefetch;ahead.required=true;
+        const ahead=node('input','');ahead.type='number';ahead.min=0;ahead.max=200;ahead.step=1;ahead.value=row.prefetch;ahead.required=true;
         const cap=node('input','');cap.type='number';cap.min=0;cap.max=1024;cap.step=1;cap.value=row.cache_limit_mb;cap.required=true;
         const aheadLabel=node('label','미리 수집할 다음 회차 수 ');aheadLabel.append(ahead);
         const capLabel=node('label','본문 저장 한도 (MB) ');capLabel.append(cap);
         const settingsButton=node('button','수집 설정 저장');
-        settings.append(aheadLabel,node('p',''),capLabel,node('p','현재 회차는 별도로 수집합니다. 미리 수집 0~20회, 저장 한도 0은 제한 없음. 한도에 도달해도 기존 본문은 삭제하지 않습니다. 설정은 새 수집 요청부터 적용되며 이미 대기 중인 작업은 남습니다.'),settingsButton);
+        settings.append(aheadLabel,node('p',''),capLabel,node('p','현재 회차는 별도로 수집합니다. 미리 수집 0~200회, 저장 한도 0은 제한 없음. 한도에 도달해도 기존 본문은 삭제하지 않습니다. 설정은 새 수집 요청부터 적용되며 이미 대기 중인 작업은 남습니다.'),settingsButton);
         settings.onsubmit=e=>{e.preventDefault();change(settingsButton,'settings',{settings:{paused:row.paused,prefetch:Number(ahead.value),cache_limit_mb:Number(cap.value)}},'수집 설정을 저장했습니다.');};
         const remove=node('button','이 작품 전체 삭제');remove.className='danger';
         remove.onclick=async()=>{

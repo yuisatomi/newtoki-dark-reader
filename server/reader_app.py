@@ -210,7 +210,7 @@ def checked_settings(data):
     if not isinstance(data, dict):
         raise ValueError('수집 설정이 올바르지 않습니다.')
     values = {}
-    for key, default, maximum in (('paused', 0, 1), ('prefetch', 2, 20), ('cache_limit_mb', 0, 1024)):
+    for key, default, maximum in (('paused', 0, 1), ('prefetch', 2, 200), ('cache_limit_mb', 0, 1024)):
         value = data.get(key, default)
         if type(value) is not int or not 0 <= value <= maximum:
             raise ValueError('수집 설정 범위를 확인하세요.')

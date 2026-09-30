@@ -240,7 +240,7 @@ class ReaderAppTest(unittest.TestCase):
         reader_app.run_one_job(reader_sync.connect)
         endpoint='/app/api/manage/settings'
         settings={'paused':0,'prefetch':0,'cache_limit_mb':1}
-        for invalid in ({'prefetch':21},{'cache_limit_mb':-1},{'paused':True}):
+        for invalid in ({'prefetch':201},{'prefetch':-1},{'prefetch':True},{'prefetch':1.5},{'cache_limit_mb':-1},{'paused':True}):
             self.assertEqual(self.request(endpoint,{'work_id':'999','settings':invalid})[0],400)
         self.assertEqual(self.request(endpoint,{'work_id':'999','settings':settings},cookie=False)[0],401)
         self.assertEqual(self.request(endpoint,{'work_id':'999','settings':settings})[0],200)
@@ -662,6 +662,29 @@ class ReaderAppTest(unittest.TestCase):
             reader_app.queue_prefetch(db, '9000', '2')
             jobs = db.execute("SELECT episode_id FROM reader_jobs WHERE work_id='9000' ORDER BY episode_id").fetchall()
         self.assertEqual([row['episode_id'] for row in jobs], ['2', '4'])
+
+    def test_large_prefetch_limit(self):
+        self.login()
+        with reader_sync.connect() as db:
+            db.execute("INSERT INTO reader_works VALUES('9000','newtoki1.org','시험',1)")
+            db.executemany("""INSERT INTO reader_episodes
+                (work_id,episode_id,ordinal,title,source_url,updated_at) VALUES('9000',?,?,?,?,1)""",
+                [(str(n),n,f'{n}화',f'https://newtoki1.org/novel/9000/{n}') for n in range(1,251)])
+            self.assertEqual(reader_app.work_settings(db,'9000')['prefetch'],2)
+        settings={'paused':0,'prefetch':200,'cache_limit_mb':0}
+        self.assertEqual(self.request('/app/api/manage/settings',{'work_id':'9000','settings':settings})[0],200)
+        reader_sync.init_db()
+        backup=self.request('/app/api/manage/backup?work_id=9000')[1]
+        self.assertEqual(reader_app.checked_backup(backup)['settings']['prefetch'],200)
+        with reader_sync.connect() as db:
+            self.assertEqual(reader_app.work_settings(db,'9000'),settings)
+            reader_app.queue_prefetch(db,'9000','1')
+            reader_app.queue_prefetch(db,'9000','1')
+            ids={r[0] for r in db.execute("SELECT episode_id FROM reader_jobs WHERE work_id='9000'")}
+            self.assertEqual(ids,{str(n) for n in range(1,202)})
+            db.execute("DELETE FROM reader_jobs WHERE work_id='9000'")
+            reader_app.queue_prefetch(db,'9000','249')
+            self.assertEqual({r[0] for r in db.execute("SELECT episode_id FROM reader_jobs WHERE work_id='9000'")},{'249','250'})
 
     def test_verification_pauses_source_until_authenticated_resume(self):
         self.login()
@@ -1211,11 +1234,11 @@ class ReaderAppTest(unittest.TestCase):
                 card=direct.locator('#manage-list [data-work-id="999"]')
                 expect(card).to_contain_text('본문 저장 3개')
                 expect(card).to_contain_text('읽은 위치:')
-                card.get_by_label('미리 수집할 다음 회차 수').fill('1')
+                card.get_by_label('미리 수집할 다음 회차 수').fill('200')
                 card.get_by_label('본문 저장 한도 (MB)').fill('8')
                 card.get_by_role('button',name='수집 설정 저장').click()
                 expect(direct.locator('#manage-message')).to_have_text('수집 설정을 저장했습니다.')
-                expect(card.get_by_label('미리 수집할 다음 회차 수')).to_have_value('1')
+                expect(card.get_by_label('미리 수집할 다음 회차 수')).to_have_value('200')
                 card.get_by_role('button',name='수집 일시정지',exact=True).click()
                 expect(card.get_by_role('button',name='수집 재개',exact=True)).to_be_visible()
                 card.get_by_role('button',name='실패 작업 재시도').click()
