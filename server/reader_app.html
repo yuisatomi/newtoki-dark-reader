@@ -30,6 +30,8 @@
   .item strong { display:block; color:var(--title); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   #manage-list h2 { overflow-wrap:anywhere; }
   #manage-list input[type=number] { width:95px; }
+  .cached-episodes ul { max-height:40vh; overflow:auto; padding-left:24px; }
+  .cached-episodes li { margin:8px 0; overflow-wrap:anywhere; }
   #restore-file { max-width:100%; }
   .resource-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:16px; }
   .resource-grid h3 { margin:8px 0; font-size:1rem; }
@@ -270,6 +272,24 @@
         const read=row.episode_id ? (row.episode_title || '회차 제목 미수집')+' · '+Math.round(row.position*100)+'% 지점' : '읽기 기록 없음';
         card.append(node('p','읽은 위치: '+read));
         card.append(node('p',`회차 목록 ${row.total}개 · 본문 저장 ${row.ready}개 · 잠김 ${row.locked}개`));
+        const cached=node('details','');cached.className='cached-episodes';
+        const cachedSummary=node('summary',`저장된 회차 보기 (${row.ready}개)`);
+        const cachedStatus=node('p','');cachedStatus.className='message';cachedStatus.setAttribute('role','status');
+        const cachedList=node('ul',''),cachedRefresh=node('button','저장 회차 새로고침');
+        async function loadCached() {
+          if(cachedRefresh.disabled)return;
+          cachedRefresh.disabled=true;cachedStatus.textContent='저장된 회차 확인 중…';cachedList.replaceChildren();
+          try {
+            const data=await api('work/'+row.work_id),chapters=data.episodes.filter(chapter=>chapter.state==='ready');
+            const items=document.createDocumentFragment();
+            for(const chapter of chapters)items.append(node('li',`목록 ${chapter.ordinal}번째 · ${chapter.title || '제목 없음'}`));
+            cachedList.append(items);cachedSummary.textContent=`저장된 회차 보기 (${chapters.length}개)`;
+            cachedStatus.textContent=chapters.length?'본문 저장 완료 회차입니다. 목록 순서는 실제 회차 번호와 다를 수 있습니다.':'DB에 본문이 저장된 회차가 없습니다.';
+          } catch(e){cachedStatus.textContent='저장 회차 조회 실패: '+e.message;}
+          finally {cachedRefresh.disabled=false;}
+        }
+        cachedRefresh.onclick=loadCached;cached.ontoggle=()=>{if(cached.open)loadCached();};
+        cached.append(cachedSummary,cachedStatus,cachedRefresh,cachedList);card.append(cached);
         card.append(node('p',`수집 대기/진행 ${row.pending}개 · 오류 작업 ${row.errors}개 · 사람 확인 대기 ${row.verification}개`));
         card.append(node('p','본문 텍스트 약 '+(row.bytes/1024).toFixed(1)+' KB'+(row.host?' · '+row.host:'')));
         card.append(node('p',(row.paused?'수집 일시정지':'수집 허용')+` · 저장 한도 대기 ${row.capacity}개`));
