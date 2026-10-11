@@ -60,6 +60,11 @@
   #reader-status { flex-basis:100%; text-align:center; font-size:.85rem; color:var(--text); }
   #save-feedback { margin-left:10px; }
   #reader-nav.collapsed { transform:translateY(110%); visibility:hidden; }
+  #progress-notice { position:fixed; top:calc(8px + env(safe-area-inset-top)); left:50%; transform:translateX(-50%);
+    z-index:12; width:min(680px,calc(100% - 20px)); padding:12px; border:1px solid var(--accent); border-radius:10px;
+    background:var(--surface); box-shadow:0 4px 18px #0005; display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+  #progress-notice-text { flex:1 1 220px; margin:0; font-size:.85rem; overflow-wrap:anywhere; }
+  #resume-latest { min-height:44px; }
   @media(max-width:600px) { #reader { padding:16px 17px 110px; } #reader-nav { gap:5px; } #reader-nav button { padding:9px 4px; font-size:.9rem; } }
 </style>
 </head>
@@ -91,6 +96,7 @@
       <button id="save-source">선택</button>
     </div>
     <p class="message" id="work-message"></p>
+    <p class="message" id="work-collection-status" role="status"></p>
     <div id="episode-list" class="card"></div>
   </section>
 </main>
@@ -147,6 +153,10 @@
   <p class="muted">좌측 여백: 한 화면 위로 · 우측 여백: 한 화면 아래로</p>
   <p class="message" id="reader-message"></p>
   <div id="content"></div>
+  <aside id="progress-notice" class="hidden" aria-label="최신 읽기 기록">
+    <p id="progress-notice-text" role="status"></p>
+    <button id="resume-latest" class="primary">최신 읽던 회차로 이동</button>
+  </aside>
   <div id="reader-nav">
     <div id="reader-status"><span id="current-episode" aria-live="polite"></span><span id="save-feedback" role="status"></span></div>
     <button id="previous">◀ 이전화</button><button id="next" class="primary">다음화 ▶</button>
@@ -168,7 +178,7 @@
   const $ = id => document.getElementById(id);
   const state = { workId:'', episodeId:'', work:null, remote:null, writable:false, reading:false, manualSaving:false, transitionFrom:'', poll:null, save:null, saving:Promise.resolve(), workRequest:0 };
   let navScrollY=0, navKeepUntil=0;
-  let resourcesTimer=null, resourcesLoading=false;
+  let resourcesTimer=null, resourcesLoading=false, progressChecking=false;
   function setNavVisible(visible) {
     $('reader-nav').classList.toggle('collapsed',!visible);
     navScrollY=scrollY;
@@ -257,7 +267,10 @@
   document.addEventListener('visibilitychange',()=>{
     clearTimeout(resourcesTimer);resourcesTimer=null;
     if(!document.hidden&&!$('manage').classList.contains('hidden'))refreshResources();
+    if(!document.hidden)checkReaderProgress();
   });
+  window.addEventListener('focus',checkReaderProgress);
+  window.addEventListener('pageshow',checkReaderProgress);
   async function manageScreen() {
     await savePosition(false); clearTimeout(state.save); clearPoll();
     state.workRequest++;state.reading=false;state.writable=false;state.episodeId='';
@@ -485,39 +498,111 @@
     }
     clearPoll(); state.workId=workId; show('home'); $('library').classList.add('hidden'); $('work').classList.remove('hidden');
     const request=++state.workRequest; $('episode-list').replaceChildren(); note('work-message','회차 목록 불러오는 중…');
+    note('work-collection-status','');
     history.replaceState({},'', '/app?work='+encodeURIComponent(workId));
-    try {
-      const result=await api('work/'+workId); if(request!==state.workRequest) return; state.work=result;
-      $('work-title').textContent=result.work?.title && result.work.title!=='소설 '+workId
-        ? result.work.title : result.progress?.title || result.work?.title || '소설 '+workId;
-      $('source-chooser').classList.toggle('hidden',!!result.work?.host);
-      $('source').replaceChildren(...result.sources.map(host=>{const option=node('option',host);option.value=host;return option;}));
-      const list=$('episode-list'); list.replaceChildren();
-      for(const chapter of result.episodes) {
-        const button=node('button',chapter.title || chapter.ordinal+'화');
-        if(chapter.episode_id===result.progress?.episode_id) button.classList.add('current');
-        button.onclick=()=>openEpisode(chapter.episode_id);
-        list.append(button);
-      }
-      const job=result.list_job;
-      note('work-message',job?.state==='error' ? job.error : !result.work?.host ? '출처를 선택하세요.'
-        : job?.state==='queued'||job?.state==='running' ? job.error || '전체 회차 목록 수집 중…'
-        : result.episodes.length ? result.episodes.length+'개 회차' : '목록을 새로고침하세요.');
-      if(desiredEpisode && result.episodes.some(x=>x.episode_id===desiredEpisode)) return openEpisode(desiredEpisode);
-      if(result.paused) {
-        note('work-message','수집이 일시정지되어 있습니다. 저장된 본문은 계속 읽을 수 있습니다.');
-        const manage=node('button','작품 관리');manage.onclick=manageScreen;$('work-message').append(manage);
-        list.querySelector('.current')?.scrollIntoView({block:'center'});return;
-      }
-      if(result.verification) {verification('work-message',result.verification,()=>openWork(workId,desiredEpisode));return;}
-      if(job?.state==='queued'||job?.state==='running') poll(()=>openWork(workId,desiredEpisode));
-      else list.querySelector('.current')?.scrollIntoView({block:'center'});
-    } catch(e) {if(request===state.workRequest)note('work-message',e.message);}
+    let listKey='';
+    const current=()=>request===state.workRequest && state.workId===workId && !$('home').classList.contains('hidden') && !$('work').classList.contains('hidden');
+    async function refresh(initial=false) {
+      try {
+        const result=await api('work/'+workId); if(!current()) return; state.work=result;
+        $('work-title').textContent=result.work?.title && result.work.title!=='소설 '+workId
+          ? result.work.title : result.progress?.title || result.work?.title || '소설 '+workId;
+        $('source-chooser').classList.toggle('hidden',!!result.work?.host);
+        $('source').replaceChildren(...result.sources.map(host=>{const option=node('option',host);option.value=host;return option;}));
+        const list=$('episode-list');
+        const key=JSON.stringify([result.progress?.episode_id,result.episodes.map(chapter=>[chapter.episode_id,chapter.title,chapter.ordinal])]);
+        if(key!==listKey) {
+          const top=list.scrollTop,items=document.createDocumentFragment();
+          for(const chapter of result.episodes) {
+            const button=node('button',chapter.title || chapter.ordinal+'화');
+            if(chapter.episode_id===result.progress?.episode_id) button.classList.add('current');
+            button.onclick=()=>openEpisode(chapter.episode_id);items.append(button);
+          }
+          list.replaceChildren(items);list.scrollTop=top;listKey=key;
+        }
+        const job=result.list_job;
+        const pending=job?.state==='queued'||job?.state==='running';
+        note('work-message',!result.work?.host ? '출처를 선택하세요.'
+          : result.episodes.length ? '저장된 회차 목록 '+result.episodes.length+'개' : '저장된 회차 목록이 없습니다.');
+        note('work-collection-status',job?.state==='error' ? '목록 갱신 실패 · '+job.error
+          : pending ? (result.episodes.length?'새 회차 목록 갱신 중…':'회차 목록 수집 중…')+(job.error?' · '+job.error:'') : '');
+        if(desiredEpisode && result.episodes.some(x=>x.episode_id===desiredEpisode)) return openEpisode(desiredEpisode);
+        if(result.paused) {
+          note('work-message','수집이 일시정지되어 있습니다. 저장된 본문은 계속 읽을 수 있습니다.');
+          const manage=node('button','작품 관리');manage.onclick=manageScreen;$('work-message').append(manage);
+          if(initial)list.querySelector('.current')?.scrollIntoView({block:'center'});return;
+        }
+        if(result.verification) {verification('work-message',result.verification,()=>openWork(workId,desiredEpisode));return;}
+        if(initial)list.querySelector('.current')?.scrollIntoView({block:'center'});
+        if(pending)poll(()=>refresh());
+      } catch(e) {if(current())note(initial?'work-message':'work-collection-status','목록 조회 실패 · '+e.message);}
+    }
+    await refresh(true);
   }
+  function progressNotice(episodes=state.work?.episodes || []) {
+    const remote=state.remote, current=episodes.find(x=>x.episode_id===state.episodeId);
+    const stored=episodes.find(x=>x.episode_id===remote?.episode_id);
+    const newer=remote && !remote.deleted && current && stored && stored.ordinal>current.ordinal;
+    $('progress-notice').classList.toggle('hidden',!newer);
+    if(newer) note('progress-notice-text','더 뒤의 읽기 기록: '+(stored.title || '목록 '+stored.ordinal+'번째')
+      +' · '+Math.round(remote.position*100)+'% 지점. 현재 회차의 자동 저장은 멈췄습니다.');
+  }
+  function applyRemoteProgress(fresh) {
+    const remote=fresh.progress;
+    state.remote=remote;state.work.progress=remote;
+    const current=fresh.episodes.find(x=>x.episode_id===state.episodeId);
+    const stored=fresh.episodes.find(x=>x.episode_id===remote?.episode_id);
+    const same=remote && remote.episode_id===state.episodeId;
+    const ahead=current && stored && current.ordinal>stored.ordinal;
+    state.writable=!!remote && !remote.deleted && (same || !!ahead);
+    if(!state.writable) {
+      state.transitionFrom='';
+      note('reader-message',remote?.deleted
+        ? '서버에서 삭제된 기록입니다. 자동 저장을 멈췄습니다. 다시 저장하려면 저장 버튼을 누르세요.'
+        : current && stored && stored.ordinal>current.ordinal
+          ? '서버에 더 뒤의 회차가 저장되어 있어 자동 저장을 멈췄습니다.'
+          : '서버 기록과 회차 순서를 확인할 수 없어 자동 저장을 멈췄습니다. 저장 버튼으로 확인하세요.');
+    } else note('reader-message','');
+    progressNotice(fresh.episodes);
+    return state.writable;
+  }
+  async function checkReaderProgress() {
+    if(progressChecking || document.hidden || !state.reading || $('reader').classList.contains('hidden'))return;
+    const workId=state.workId, episodeId=state.episodeId, request=state.workRequest;
+    const current=()=>state.workId===workId && state.episodeId===episodeId && state.workRequest===request
+      && state.reading && !$('reader').classList.contains('hidden');
+    // Share the save queue: a resume check must not rebase an in-flight stale save.
+    const previous=state.saving;let finish;
+    state.saving=new Promise(resolve=>{finish=resolve;});progressChecking=true;
+    try {
+      await previous;if(!current())return;
+      const fresh=await api('work/'+workId);
+      if(current())applyRemoteProgress(fresh);
+    } catch(e) {
+      if(current())note('reader-message','최신 읽기 기록 확인 실패: '+e.message+' · 다시 돌아오면 재확인합니다.');
+    } finally {progressChecking=false;finish();}
+  }
+  $('resume-latest').onclick=async()=>{
+    const button=$('resume-latest'), workId=state.workId, request=state.workRequest;
+    const current=()=>state.workId===workId && state.workRequest===request && !$('reader').classList.contains('hidden');
+    button.disabled=true;button.textContent='최신 기록 확인 중…';clearTimeout(state.save);
+    try {
+      await state.saving;if(!current())return;
+      const fresh=await api('work/'+workId);if(!current())return;
+      applyRemoteProgress(fresh);
+      const remote=fresh.progress;
+      if(!remote || remote.deleted || !fresh.episodes.some(x=>x.episode_id===remote.episode_id))return;
+      state.writable=false;state.transitionFrom='';state.work=fresh;
+      await openEpisode(remote.episode_id);
+    } catch(e) {
+      if(current())note('progress-notice-text','최신 읽기 기록 확인 실패: '+e.message+' · 이동 버튼을 다시 눌러주세요.');
+    } finally {button.disabled=false;button.textContent='최신 읽던 회차로 이동';}
+  };
   async function openEpisode(episodeId) {
     clearPoll(); clearTimeout(state.save);
     if(!$('reader').classList.contains('hidden') && state.episodeId!==episodeId) await savePosition(false);
     const previous=state.episodeId; state.episodeId=episodeId; state.reading=false;
+    const request=++state.workRequest;
     const workId=state.workId;
     if(!state.work || state.work.work?.work_id!==workId) state.work=await api('work/'+workId);
     state.remote=state.work.progress;
@@ -528,13 +613,14 @@
       : previous===episodeId ? state.transitionFrom : '';
     state.writable=!state.remote || (!state.remote.deleted && (!state.remote.episode_id || state.remote.episode_id===episodeId || !!state.transitionFrom));
     show('reader'); $('content').replaceChildren(); note('reader-message','본문 불러오는 중…'); scrollTo(0,0);
+    progressNotice();
     $('current-episode').textContent='회차 확인 중…'; $('current-episode').title='';
     $('manual-save').disabled=true; $('save-feedback').textContent='';
     setNavVisible(true);
     history.replaceState({},'', '/app?work='+workId+'&ep='+episodeId);
     try {
       const info=await api('episode/'+workId+'/'+episodeId);
-      if(state.episodeId!==episodeId) return;
+      if(state.workId!==workId || state.episodeId!==episodeId || state.workRequest!==request) return;
       const chapter=state.work.episodes.find(x=>x.episode_id===episodeId);
       $('reader-title').textContent=chapter?.title || info.episode.title;
       const episodeTitle=chapter?.title || info.episode.title || '';
@@ -553,7 +639,7 @@
           : '서버에는 다른 회차가 저장되어 있습니다. 이 회차는 로컬에서만 읽습니다.');
         const ratio=!state.remote?.deleted && state.remote?.episode_id===episodeId ? Number(state.remote.position)||0 : Number(sessionStorage.getItem('readerPosition:'+workId+':'+episodeId))||0;
         requestAnimationFrame(()=>{
-          if(state.workId!==workId || state.episodeId!==episodeId) return;
+          if(state.workId!==workId || state.episodeId!==episodeId || state.workRequest!==request) return;
           navScrollY=ratio*Math.max(0,document.documentElement.scrollHeight-innerHeight);
           scrollTo(0,navScrollY);
           state.reading=true;
@@ -575,7 +661,7 @@
       } else {
         note('reader-message',info.job?.error || '본문 수집 중…'); poll(()=>openEpisode(episodeId));
       }
-    } catch(e) {note('reader-message',e.message);}
+    } catch(e) {if(state.workRequest===request)note('reader-message',e.message);}
   }
   async function savePosition(manual, keepalive=false) {
     if(!state.reading||!state.workId||!state.episodeId||$('reader').classList.contains('hidden')) return;
@@ -593,6 +679,7 @@
         const fresh=await api('work/'+workId);
         if(state.workId!==workId || state.episodeId!==episodeId)return;
         state.remote=fresh.progress;state.work.progress=fresh.progress;
+        progressNotice(fresh.episodes);
         if(state.remote && (state.remote.deleted || state.remote.episode_id!==episodeId)
           && !confirm(state.remote.deleted ? '삭제된 기록을 다시 저장할까요?' : '서버의 다른 회차 기록을 현재 회차로 바꿀까요?')) {
           state.writable=false;state.transitionFrom='';return;
@@ -608,22 +695,8 @@
           if(e.status!==409 || manual || keepalive || attempt===1)throw e;
           const fresh=await api('work/'+workId);
           if(state.workId!==workId || state.episodeId!==episodeId)return;
-          const remote=fresh.progress;
-          state.remote=remote;state.work.progress=remote;
-          const current=fresh.episodes.find(x=>x.episode_id===episodeId);
-          const stored=fresh.episodes.find(x=>x.episode_id===remote?.episode_id);
-          const same=remote && remote.episode_id===episodeId;
-          const ahead=current && stored && current.ordinal>stored.ordinal;
-          if(!remote || remote.deleted || (!same && !ahead)) {
-            state.writable=false;state.transitionFrom='';
-            note('reader-message',remote?.deleted
-              ? '서버에서 삭제된 기록입니다. 자동 저장을 멈췄습니다. 다시 저장하려면 저장 버튼을 누르세요.'
-              : current && stored && stored.ordinal>current.ordinal
-                ? '서버에 더 뒤의 회차가 저장되어 있어 자동 저장을 멈췄습니다.'
-                : '서버 기록과 회차 순서를 확인할 수 없어 자동 저장을 멈췄습니다. 저장 버튼으로 확인하세요.');
-            return false;
-          }
-          payload.expected_revision=remote.revision;
+          if(!applyRemoteProgress(fresh))return false;
+          payload.expected_revision=state.remote.revision;
           // The server merges same-episode positions with max(); never force a rewind on retry.
           payload.allow_rewind=false;
         }
@@ -632,6 +705,7 @@
         state.remote={episode_id:episodeId,position:saved.position,revision:saved.revision};
         state.work.progress=state.remote;
         state.writable=true;state.transitionFrom='';note('reader-message',manual?'서버에 저장했습니다.':'');
+        progressNotice();
       }
       return true;
     } catch(e) {
@@ -655,7 +729,7 @@
     if(!tap || performance.now()-tap.time>600 || !state.reading || $('reader').classList.contains('hidden')
       || !$('settings').classList.contains('hidden') || e.defaultPrevented || e.button!==0
       || Math.hypot(e.clientX-tap.x,e.clientY-tap.y)>10
-      || e.target.closest('#reader-nav, a,button,input,select,textarea,label,[contenteditable]')
+      || e.target.closest('#reader-nav,#progress-notice, a,button,input,select,textarea,label,[contenteditable]')
       || window.getSelection()?.toString())return;
     const edge=innerWidth<=600 ? .35 : .15, x=e.clientX/innerWidth;
     const direction=x<edge ? -1 : x>1-edge ? 1 : 0;

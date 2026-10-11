@@ -865,6 +865,7 @@ class ReaderAppTest(unittest.TestCase):
                             page.once('dialog',lambda dialog: dialog.dismiss())
                             page.locator('#manual-save').click()
                             expect(page.locator('#save-feedback')).to_have_text('저장을 취소했습니다')
+                            expect(page.locator('#progress-notice')).to_be_visible()
                             before=progress()
                             page.evaluate('scrollTo(0,(document.documentElement.scrollHeight-innerHeight)*.4)')
                             page.wait_for_timeout(900)
@@ -908,12 +909,14 @@ class ReaderAppTest(unittest.TestCase):
                             self.assertEqual(progress(),before,'Unsafe remote progress must be preserved')
                             self.assertEqual(writes,[409])
                             if case=='server-ahead':
+                                expect(page.locator('#progress-notice')).to_be_visible()
                                 page.evaluate('scrollBy(0,-30)')
                                 expect(page.locator('#reader-nav')).to_be_visible()
                                 page.once('dialog',lambda dialog: dialog.accept())
                                 page.locator('#manual-save').click()
                                 expect(page.locator('#save-feedback')).to_contain_text('서버에 저장했습니다')
                                 self.assertEqual(progress()['episode_id'],'20','Explicit manual rewind must still work')
+                                expect(page.locator('#progress-notice')).to_be_hidden()
                         if case in ('same','same-farther','ahead','repeated'):
                             page.evaluate('scrollTo(0,(document.documentElement.scrollHeight-innerHeight)*.9)')
                             for _ in range(60):
@@ -921,6 +924,157 @@ class ReaderAppTest(unittest.TestCase):
                                 page.wait_for_timeout(50)
                             self.assertGreater(progress()['position'],.89,'Autosave must continue after reconciliation or bounded retry')
                         page.close()
+            finally:
+                browser.close()
+
+    def test_browser_resumed_reader_shows_latest_progress(self):
+        try:
+            from playwright.sync_api import expect, sync_playwright
+        except ImportError:
+            self.skipTest('Playwright is not installed')
+        executable=os.environ.get('READER_TEST_BROWSER') or r'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe'
+        if not Path(executable).exists():
+            self.skipTest('A local Chromium browser is not available')
+        with reader_sync.connect() as db:
+            db.execute("INSERT INTO reader_works VALUES('999','newtoki1.org','기기 복귀 시험',1)")
+            for ordinal,eid in enumerate(('91','20','10'),1):
+                db.execute('''INSERT INTO reader_episodes
+                    (work_id,episode_id,ordinal,title,source_url,paragraphs_json,state,updated_at)
+                    VALUES('999',?,?,?,?,?,'ready',1)''', (eid,ordinal,f'{ordinal}화',
+                    f'https://newtoki1.org/novel/999/{eid}',json.dumps(['긴 본문입니다. '*8]*100)))
+        self.login()
+        def progress():
+            return self.request('/v1/progress?kind=novel&work_id=999',bearer=True)[1]['progress']
+        def update(eid,position):
+            status,_=reader_sync.store_progress(dict(kind='novel',work_id='999',episode_id=eid,
+                position=position,expected_revision=progress()['revision'],allow_rewind=True))
+            self.assertEqual(status,200)
+        with sync_playwright() as playwright:
+            browser=playwright.chromium.launch(headless=True,executable_path=executable)
+            try:
+                page=browser.new_page(viewport={'width':390,'height':800},is_mobile=True,has_touch=True)
+                page.goto(self.base+'/app?work=999&ep=91')
+                page.locator('#token').fill(reader_sync.SYNC_TOKEN)
+                page.locator('#login-form button').click()
+                page.locator('#content p').first.wait_for()
+                page.wait_for_timeout(1000)
+                page.evaluate('scrollBy(0,100)')
+                expect(page.locator('#reader-nav')).to_be_hidden()
+                page.wait_for_timeout(900)
+                old_y=page.evaluate('scrollY')
+                self.assertLess(page.locator('#reader-message').bounding_box()['y'],0)
+                expect(page.locator('#progress-notice')).to_be_hidden()
+                writes=[]
+                page.on('request',lambda request: writes.append(request.post_data) if request.url.endswith('/app/api/progress') else None)
+                update('20',.65)
+                before=progress()
+                # Returning to a long-lived tab must discover progress without scrolling/saving.
+                page.evaluate("document.dispatchEvent(new Event('visibilitychange'));window.dispatchEvent(new Event('focus'))")
+                expect(page.locator('#progress-notice')).to_be_visible()
+                expect(page.locator('#progress-notice-text')).to_contain_text('2화')
+                box=page.locator('#progress-notice').bounding_box()
+                self.assertGreaterEqual(box['y'],0)
+                self.assertLess(box['y']+box['height'],800)
+                self.assertEqual(page.evaluate('scrollY'),old_y)
+                page.evaluate('scrollBy(0,100)')
+                page.wait_for_timeout(900)
+                self.assertEqual(progress(),before)
+                self.assertEqual(writes,[],'Resume checks must never overwrite newer progress')
+                expect(page.locator('#reader-nav')).to_be_hidden()
+                # The action reads the latest record again, not the chapter from an old notice.
+                update('10',.72)
+                page.route('**/app/api/work/999',lambda route: route.abort())
+                page.locator('#resume-latest').click()
+                expect(page.locator('#progress-notice-text')).to_contain_text('확인 실패')
+                expect(page.locator('#resume-latest')).to_be_enabled()
+                self.assertIn('ep=91',page.url)
+                page.unroute('**/app/api/work/999')
+                page.locator('#resume-latest').click()
+                expect(page.locator('#reader-title')).to_have_text('3화')
+                expect(page.locator('#progress-notice')).to_be_hidden()
+                page.wait_for_timeout(900)
+                self.assertAlmostEqual(page.evaluate('scrollY/(document.documentElement.scrollHeight-innerHeight)'),.72,delta=.01)
+                self.assertEqual(progress()['episode_id'],'10')
+                # Already-stale direct links also show the notice; an older server chapter does not.
+                page.goto(self.base+'/app?work=999&ep=20')
+                expect(page.locator('#progress-notice')).to_be_visible()
+                expect(page.locator('#manual-save')).to_be_enabled()
+                update('91',.3)
+                page.evaluate("window.dispatchEvent(new Event('pageshow'))")
+                expect(page.locator('#progress-notice')).to_be_hidden()
+                # An in-flight check cannot resurrect a notice after leaving the reader.
+                pending=[]
+                page.route('**/app/api/work/999',lambda route: pending.append(route))
+                page.evaluate("window.dispatchEvent(new Event('focus'))")
+                page.wait_for_timeout(300)
+                self.assertEqual(len(pending),1)
+                page.locator('#show-list').click()
+                pending.pop(0).continue_()
+                page.wait_for_timeout(100)
+                for route in pending:
+                    route.continue_()
+                expect(page.locator('#work')).to_be_visible()
+                expect(page.locator('#progress-notice')).to_be_hidden()
+            finally:
+                browser.close()
+
+    def test_browser_list_refresh_preserves_cached_list(self):
+        try:
+            from playwright.sync_api import expect, sync_playwright
+        except ImportError:
+            self.skipTest('Playwright is not installed')
+        executable=os.environ.get('READER_TEST_BROWSER') or r'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe'
+        if not Path(executable).exists():
+            self.skipTest('A local Chromium browser is not available')
+        with reader_sync.connect() as db:
+            db.execute("INSERT INTO reader_works VALUES('999','newtoki1.org','시험 작품',1)")
+            db.executemany("""INSERT INTO reader_episodes(work_id,episode_id,ordinal,title,source_url,updated_at)
+                VALUES('999',?,?,?,?,1)""", [(str(n),n,f'{n}화',f'https://newtoki1.org/novel/999/{n}') for n in range(1,81)])
+            reader_app.enqueue(db,'999')
+            db.execute("UPDATE reader_jobs SET error='15초 후 자동 재시도 3/3' WHERE work_id='999'")
+        with sync_playwright() as playwright:
+            browser=playwright.chromium.launch(headless=True,executable_path=executable)
+            try:
+                page=browser.new_page(viewport={'width':390,'height':800})
+                page.goto(self.base+'/app?work=999')
+                page.locator('#token').fill(reader_sync.SYNC_TOKEN)
+                page.locator('#login-form button').click()
+                expect(page.locator('#episode-list button')).to_have_count(80)
+                expect(page.locator('#work-message')).to_have_text('저장된 회차 목록 80개')
+                expect(page.locator('#work-collection-status')).to_contain_text('자동 재시도 3/3')
+                page.evaluate("window.savedListButton=document.querySelector('#episode-list button');document.querySelector('#episode-list').scrollTop=600")
+                with reader_sync.connect() as db:
+                    before=[tuple(r) for r in db.execute('SELECT * FROM reader_jobs')]
+                with page.expect_response('**/app/api/work/999'):
+                    page.wait_for_timeout(2200)
+                self.assertTrue(page.evaluate("savedListButton===document.querySelector('#episode-list button')"))
+                self.assertEqual(page.locator('#episode-list').evaluate('el=>el.scrollTop'),600)
+                with reader_sync.connect() as db:
+                    self.assertEqual([tuple(r) for r in db.execute('SELECT * FROM reader_jobs')],before)
+                    db.execute("UPDATE reader_jobs SET state='running',error='' WHERE work_id='999'")
+                expect(page.locator('#work-collection-status')).to_have_text('새 회차 목록 갱신 중…',timeout=5000)
+                self.assertTrue(page.evaluate("savedListButton===document.querySelector('#episode-list button')"))
+                with reader_sync.connect() as db:
+                    db.execute("UPDATE reader_episodes SET title='새 제목' WHERE episode_id='1'")
+                    db.execute("UPDATE reader_jobs SET state='done' WHERE work_id='999'")
+                expect(page.locator('#episode-list button').first).to_have_text('새 제목',timeout=5000)
+                expect(page.locator('#work-collection-status')).to_have_text('')
+                self.assertEqual(page.locator('#episode-list').evaluate('el=>el.scrollTop'),600)
+                # A pending status response cannot reopen a screen after navigation away.
+                with reader_sync.connect() as db:
+                    db.execute("UPDATE reader_jobs SET state='queued' WHERE work_id='999'")
+                page.locator('#back-library').click()
+                page.locator('#library-list button').click()
+                expect(page.locator('#episode-list button')).to_have_count(80)
+                pending=[]
+                page.route('**/app/api/work/999',lambda route: pending.append(route))
+                page.wait_for_timeout(2300)
+                self.assertEqual(len(pending),1)
+                page.locator('#back-library').click()
+                pending.pop().continue_()
+                page.wait_for_timeout(100)
+                expect(page.locator('#library')).to_be_visible()
+                expect(page.locator('#work')).to_be_hidden()
             finally:
                 browser.close()
 
