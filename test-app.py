@@ -834,7 +834,7 @@ class ReaderAppTest(unittest.TestCase):
         with sync_playwright() as playwright:
             browser=playwright.chromium.launch(headless=True,executable_path=executable)
             try:
-                for index,case in enumerate(('same','same-farther','ahead','server-ahead','deleted','unknown','repeated','manual-cancel')):
+                for index,case in enumerate(('same','same-farther','ahead','server-ahead','deleted','unknown','repeated','manual-cancel','manual-cancel-ahead')):
                     with self.subTest(case=case):
                         work_id=str(7000+index)
                         with reader_sync.connect() as db:
@@ -860,17 +860,42 @@ class ReaderAppTest(unittest.TestCase):
                         page.wait_for_timeout(1000)  # Finish the initial position-restoration autosave.
                         writes=[]
                         page.on('response',lambda response: writes.append(response.status) if response.url.endswith('/app/api/progress') else None)
-                        if case=='manual-cancel':
-                            update('100',.8)
+                        if case.startswith('manual-cancel'):
+                            update('100' if case=='manual-cancel' else '900',.8)
                             page.once('dialog',lambda dialog: dialog.dismiss())
                             page.locator('#manual-save').click()
                             expect(page.locator('#save-feedback')).to_have_text('저장을 취소했습니다')
-                            expect(page.locator('#progress-notice')).to_be_visible()
+                            if case=='manual-cancel':expect(page.locator('#progress-notice')).to_be_visible()
                             before=progress()
                             page.evaluate('scrollTo(0,(document.documentElement.scrollHeight-innerHeight)*.4)')
                             page.wait_for_timeout(900)
                             self.assertEqual(progress(),before,'Declining manual overwrite must also prevent subsequent autosave rewind')
                             self.assertEqual(writes,[])
+                            with page.expect_response('**/app/api/work/'+work_id):
+                                page.evaluate("window.dispatchEvent(new Event('focus'))")
+                            page.wait_for_timeout(100)
+                            page.evaluate('scrollTo(0,(document.documentElement.scrollHeight-innerHeight)*.5)')
+                            page.wait_for_timeout(900)
+                            self.assertEqual(progress(),before,'Tab resume must not undo an explicit save cancellation')
+                            self.assertEqual(writes,[])
+                            page.evaluate('scrollBy(0,-30)')
+                            page.once('dialog',lambda dialog:dialog.accept())
+                            page.locator('#manual-save').click()
+                            expect(page.locator('#save-feedback')).to_contain_text('서버에 저장했습니다')
+                            page.evaluate('scrollTo(0,(document.documentElement.scrollHeight-innerHeight)*.7)')
+                            page.wait_for_timeout(900)
+                            self.assertEqual(progress()['episode_id'],'20')
+                            self.assertGreater(progress()['position'],.69,'An explicit successful save resumes autosave')
+                            if case=='manual-cancel-ahead':
+                                update('900',.3)
+                                page.evaluate('scrollBy(0,-30)')
+                                page.once('dialog',lambda dialog:dialog.dismiss())
+                                page.locator('#manual-save').click()
+                                expect(page.locator('#save-feedback')).to_have_text('저장을 취소했습니다')
+                                page.locator('#next').click()
+                                expect(page.locator('#reader-title')).to_have_text('3화')
+                                page.wait_for_timeout(900)
+                                self.assertEqual(progress()['episode_id'],'100','Explicit chapter navigation starts a new save decision')
                             page.close()
                             continue
                         if case=='deleted':
@@ -937,7 +962,7 @@ class ReaderAppTest(unittest.TestCase):
             self.skipTest('A local Chromium browser is not available')
         with reader_sync.connect() as db:
             db.execute("INSERT INTO reader_works VALUES('999','newtoki1.org','기기 복귀 시험',1)")
-            for ordinal,eid in enumerate(('91','20','10'),1):
+            for ordinal,eid in enumerate(('91','20'),1):
                 db.execute('''INSERT INTO reader_episodes
                     (work_id,episode_id,ordinal,title,source_url,paragraphs_json,state,updated_at)
                     VALUES('999',?,?,?,?,?,'ready',1)''', (eid,ordinal,f'{ordinal}화',
@@ -981,8 +1006,26 @@ class ReaderAppTest(unittest.TestCase):
                 self.assertEqual(progress(),before)
                 self.assertEqual(writes,[],'Resume checks must never overwrite newer progress')
                 expect(page.locator('#reader-nav')).to_be_hidden()
-                # The action reads the latest record again, not the chapter from an old notice.
+                # Newly collected chapters must remain known after previous/next navigation.
+                with reader_sync.connect() as db:
+                    db.execute('''INSERT INTO reader_episodes
+                        (work_id,episode_id,ordinal,title,source_url,paragraphs_json,state,updated_at)
+                        VALUES('999','10',3,'3화','https://newtoki1.org/novel/999/10',?,'ready',1)''',
+                        (json.dumps(['새 회차 본문입니다. '*8]*100),))
                 update('10',.72)
+                page.evaluate("window.dispatchEvent(new Event('focus'))")
+                expect(page.locator('#progress-notice-text')).to_contain_text('3화')
+                page.evaluate('scrollBy(0,-30)')
+                page.locator('#next').click()
+                expect(page.locator('#reader-title')).to_have_text('2화')
+                expect(page.locator('#progress-notice')).to_be_visible()
+                expect(page.locator('#progress-notice-text')).to_contain_text('3화')
+                expect(page.locator('#next')).to_be_enabled()
+                page.locator('#previous').click()
+                expect(page.locator('#reader-title')).to_have_text('1화')
+                expect(page.locator('#progress-notice')).to_be_visible()
+                # The action reads the latest record again, not the position from an old notice.
+                update('10',.78)
                 page.route('**/app/api/work/999',lambda route: route.abort())
                 page.locator('#resume-latest').click()
                 expect(page.locator('#progress-notice-text')).to_contain_text('확인 실패')
@@ -993,7 +1036,7 @@ class ReaderAppTest(unittest.TestCase):
                 expect(page.locator('#reader-title')).to_have_text('3화')
                 expect(page.locator('#progress-notice')).to_be_hidden()
                 page.wait_for_timeout(900)
-                self.assertAlmostEqual(page.evaluate('scrollY/(document.documentElement.scrollHeight-innerHeight)'),.72,delta=.01)
+                self.assertAlmostEqual(page.evaluate('scrollY/(document.documentElement.scrollHeight-innerHeight)'),.78,delta=.01)
                 self.assertEqual(progress()['episode_id'],'10')
                 # Already-stale direct links also show the notice; an older server chapter does not.
                 page.goto(self.base+'/app?work=999&ep=20')
@@ -1075,6 +1118,28 @@ class ReaderAppTest(unittest.TestCase):
                 page.wait_for_timeout(100)
                 expect(page.locator('#library')).to_be_visible()
                 expect(page.locator('#work')).to_be_hidden()
+                # Center once when an initially missing saved chapter first arrives.
+                page.unroute('**/app/api/work/999')
+                with reader_sync.connect() as db:
+                    db.execute("DELETE FROM reader_episodes WHERE work_id='999'")
+                page.goto(self.base+'/app?work=999')
+                expect(page.locator('#work-message')).to_have_text('저장된 회차 목록이 없습니다.')
+                with reader_sync.connect() as db:
+                    db.executemany('''INSERT INTO reader_episodes(work_id,episode_id,ordinal,title,source_url,updated_at)
+                        VALUES('999',?,?,?,?,1)''',[(str(n),n,f'{n}화',f'https://newtoki1.org/novel/999/{n}') for n in range(1,121)])
+                expect(page.locator('#episode-list button')).to_have_count(120,timeout=5000)
+                page.wait_for_function("""() => {
+                    const list=document.querySelector('#episode-list').getBoundingClientRect();
+                    const current=document.querySelector('#episode-list .current').getBoundingClientRect();
+                    return current.top>=list.top && current.bottom<=list.bottom;
+                }""",timeout=3000)
+                self.assertGreater(page.locator('#episode-list').evaluate('el=>el.scrollTop'),0)
+                page.locator('#episode-list').evaluate('el=>el.scrollTop=600')
+                with reader_sync.connect() as db:
+                    db.execute("UPDATE reader_jobs SET state='done' WHERE work_id='999'")
+                    db.execute("UPDATE reader_episodes SET title='갱신된 1화' WHERE work_id='999' AND episode_id='1'")
+                expect(page.locator('#episode-list button').first).to_have_text('갱신된 1화',timeout=5000)
+                self.assertEqual(page.locator('#episode-list').evaluate('el=>el.scrollTop'),600,'Later updates must preserve user scrolling')
             finally:
                 browser.close()
 
