@@ -6,6 +6,8 @@ import io
 import json
 import os
 from pathlib import Path
+import re
+import sqlite3
 import tempfile
 import threading
 import time
@@ -47,6 +49,14 @@ class TranslationTest(unittest.TestCase):
                      json.dumps(paragraphs or ['第一段。', '第二段。'], ensure_ascii=False)))
         return '/app/api/episode/69shuba-999/1'
 
+    def descending_source(self, paragraphs=None):
+        base = self.source(paragraphs)
+        with reader_sync.connect() as db:
+            for episode_id, chapter in (('1', 110), ('2', 109), ('3', 108)):
+                db.execute('UPDATE reader_episodes SET title=? WHERE work_id=? AND episode_id=?',
+                           (f'第{chapter}章 试验', '69shuba-999', episode_id))
+        return base
+
     @staticmethod
     def fake_response(payload):
         assert payload['model'] == 'gpt-6-luna'
@@ -70,6 +80,130 @@ class TranslationTest(unittest.TestCase):
             <a href="https://evil.invalid/txt/999/3">坏链接</a><a href="/txt/998/4">别的书</a>''')
         self.assertEqual(list(parser.links), ['20', '2'])
         self.assertEqual(parser.links['2'][1], '第2章 二')
+
+    def test_shuba_chronological_order_preserves_special_neighbors(self):
+        chapters = [(str(i), title, f'https://www.69shuba.com/txt/999/{i}') for i, title in enumerate(
+            ['完结感言', '第110章 后续', '第109章 试验', '月末总结', '第108章 起点', '序章'], 1)]
+        expected = list(reversed(chapters))
+        self.assertEqual(reader_crawl.chronological_shuba_chapters(chapters), expected)
+        self.assertEqual(reader_crawl.chronological_shuba_chapters(expected), expected)
+        for uncertain in (chapters[:1], [('1', '序章', ''), ('2', '无章号', '')],
+                          [('1', '第2章', ''), ('2', '第1章', ''), ('3', '第3章', '')]):
+            self.assertEqual(reader_crawl.chronological_shuba_chapters(uncertain), uncertain)
+
+    def test_shuba_order_migration_preserves_everything_except_ordinals(self):
+        self.descending_source()
+        base = '/app/api/episode/69shuba-999/2'
+        self.request(base + '/translate', {})
+        with patch.object(reader_openai, 'response_text', side_effect=self.fake_response):
+            reader_translate.run_one(reader_sync.connect)
+        self.request('/app/api/progress', {'work_id': '69shuba-999', 'episode_id': '2', 'position': .42, 'expected_revision': 0})
+        with reader_sync.connect() as db:
+            db.execute("INSERT INTO reader_episodes SELECT '999',episode_id,ordinal,title,'https://newtoki1.org/novel/999/'||episode_id,paragraphs_json,state,error,updated_at FROM reader_episodes WHERE work_id='69shuba-999'")
+        def preserved():
+            with reader_sync.connect() as db:
+                tables = [row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")]
+                return {table: [dict(row) if table != 'reader_episodes' else {key: row[key] for key in row.keys() if key != 'ordinal'}
+                                for row in db.execute('SELECT * FROM "'+table+'" ORDER BY rowid')] for table in tables}
+        before = preserved()
+        reader_sync.init_db()
+        reader_sync.init_db()
+        self.assertEqual(preserved(), before)
+        ordered = self.request('/app/api/work/69shuba-999')[1]['episodes']
+        self.assertEqual([(row['episode_id'], row['ordinal']) for row in ordered], [('3', 1), ('2', 2), ('1', 3)])
+        self.assertEqual([row['episode_id'] for row in self.request('/app/api/work/999')[1]['episodes']], ['1', '2', '3'])
+        self.assertEqual(self.request(base)[1]['translation']['state'], 'ready')
+        # The same canonical ordinals must drive prefetch, not numeric episode IDs.
+        with reader_sync.connect() as db:
+            db.execute("DELETE FROM reader_jobs WHERE work_id='69shuba-999' AND episode_id!=''")
+            db.execute("UPDATE reader_episodes SET state='missing' WHERE work_id='69shuba-999' AND episode_id IN ('1','3')")
+            support.reader_app.queue_prefetch(db, '69shuba-999', '2')
+            self.assertEqual([row[0] for row in db.execute("SELECT episode_id FROM reader_jobs WHERE work_id='69shuba-999' AND episode_id!=''")], ['1'])
+
+    def test_shuba_descending_backup_is_restored_in_reading_order(self):
+        self.descending_source()
+        self.request('/app/api/episode/69shuba-999/2/translate', {})
+        with patch.object(reader_openai, 'response_text', side_effect=self.fake_response):
+            reader_translate.run_one(reader_sync.connect)
+        self.request('/app/api/progress', {'work_id': '69shuba-999', 'episode_id': '2', 'position': .42, 'expected_revision': 0})
+        backup = self.request('/app/api/manage/backup?work_id=69shuba-999')[1]
+        self.assertEqual(backup['version'], 2)
+        self.assertEqual(self.request('/app/api/manage/restore', {'backup': backup, 'confirm': True})[0], 200)
+        restored = self.request('/app/api/manage/backup?work_id=69shuba-999')[1]
+        self.assertEqual([row['episode_id'] for row in restored['episodes']], ['3', '2', '1'])
+        self.assertEqual(restored['progress'], backup['progress'])
+        self.assertEqual(restored['translations'], backup['translations'])
+        for item in restored['episodes']:
+            original = next(row for row in backup['episodes'] if row['episode_id'] == item['episode_id'])
+            self.assertEqual(item['paragraphs'], original['paragraphs'])
+
+    def test_shuba_order_migration_rolls_back_partial_failure(self):
+        self.descending_source()
+        with reader_sync.connect() as db:
+            db.execute('''CREATE TRIGGER fail_order BEFORE UPDATE OF ordinal ON reader_episodes
+                WHEN OLD.work_id='69shuba-999' AND OLD.episode_id='1'
+                BEGIN SELECT RAISE(ABORT,'simulated migration interruption'); END''')
+        with self.assertRaises(sqlite3.IntegrityError):
+            reader_sync.init_db()
+        with reader_sync.connect() as db:
+            self.assertEqual([tuple(row) for row in db.execute(
+                "SELECT episode_id,ordinal FROM reader_episodes WHERE work_id='69shuba-999' ORDER BY ordinal")], [('1', 1), ('2', 2), ('3', 3)])
+            db.execute('DROP TRIGGER fail_order')
+        reader_sync.init_db()
+        self.assertEqual([row['episode_id'] for row in self.request('/app/api/work/69shuba-999')[1]['episodes']], ['3', '2', '1'])
+
+    def test_browser_shuba_next_and_latest_use_repaired_order(self):
+        from playwright.sync_api import expect, sync_playwright
+        executable = os.environ.get('READER_TEST_BROWSER', r'C:\Program Files\Google\Chrome\Application\chrome.exe')
+        if not Path(executable).exists(): self.skipTest('Local Chromium is unavailable')
+        self.descending_source(['原文段落。'*8]*100)
+        for episode in ('1', '2', '3'):
+            self.request('/app/api/episode/69shuba-999/'+episode+'/translate', {})
+        def translate(payload):
+            result = json.loads(self.fake_response(payload))
+            items = json.loads(payload['input'][0]['content'])['items']
+            for source, target in zip(items, result['items']):
+                if source['id'] == 'title': target['text'] = '제'+re.search(r'\d+', source['text'])[0]+'장 시험'
+            return json.dumps(result)
+        with patch.object(reader_openai, 'response_text', side_effect=translate):
+            for _ in range(3): reader_translate.run_one(reader_sync.connect)
+        reader_sync.init_db()
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True, executable_path=executable)
+            try:
+                for viewport in ({'width': 390, 'height': 844}, {'width': 1280, 'height': 900}):
+                    with reader_sync.connect() as db:
+                        old = db.execute("SELECT revision FROM progress WHERE work_id='69shuba-999'").fetchone()
+                    reader_sync.store_progress({'kind': 'novel', 'work_id': '69shuba-999', 'episode_id': '2', 'position': .42,
+                                                'expected_revision': old[0] if old else 0, 'allow_rewind': True})
+                    context = browser.new_context(viewport=viewport)
+                    context.add_cookies([{'name': self.cookie.split('=', 1)[0], 'value': self.cookie.split('=', 1)[1], 'url': self.base}])
+                    page = context.new_page()
+                    page.goto(self.base+'/app?work=69shuba-999&ep=2')
+                    expect(page.locator('#current-episode')).to_have_text('현재 109화')
+                    expect(page.locator('#manual-save')).to_be_enabled()
+                    page.wait_for_timeout(100)
+                    self.assertAlmostEqual(page.evaluate('scrollY/(document.documentElement.scrollHeight-innerHeight)'), .42, delta=.01)
+                    page.evaluate('scrollBy(0,-30)')
+                    page.locator('#next').click()
+                    expect(page.locator('#current-episode')).to_have_text('현재 110화')
+                    expect(page.locator('#next')).to_be_disabled()
+                    page.wait_for_timeout(900)
+                    self.assertEqual(self.request('/app/api/work/69shuba-999')[1]['progress']['episode_id'], '1')
+                    page.locator('#previous').click()
+                    expect(page.locator('#current-episode')).to_have_text('현재 109화')
+                    expect(page.locator('#progress-notice')).to_be_visible()
+                    expect(page.locator('#progress-notice-text')).to_contain_text('第110章')
+                    page.wait_for_timeout(900)
+                    self.assertEqual(self.request('/app/api/work/69shuba-999')[1]['progress']['episode_id'], '1')
+                    page.locator('#previous').click()
+                    expect(page.locator('#current-episode')).to_have_text('현재 108화')
+                    page.locator('#resume-latest').click()
+                    expect(page.locator('#current-episode')).to_have_text('현재 110화')
+                    expect(page.locator('#progress-notice')).to_be_hidden()
+                    context.close()
+            finally:
+                browser.close()
 
     def test_original_prefetch_never_translates(self):
         base = self.source()
@@ -366,7 +500,7 @@ class TranslationTest(unittest.TestCase):
                 # Browser-based source parsing uses the public DOM, not private APIs.
                 context = browser.new_context()
                 page = context.new_page()
-                fixture = '<title>书最新章节</title><h1>作品</h1><a href="/txt/999/2">第二章</a><a href="/txt/999/1">第一章</a>'
+                fixture = '<title>书最新章节</title><h1>作品</h1><a href="/txt/999/2">第2章 后续</a><a href="/txt/999/1">第1章 起点</a>'
                 chapter = '<div class="txtnav"><h1>标题</h1><div class="txtinfo">广告信息</div><script>bad()</script><button>按钮</button>' + ('原文段落。' * 20) + '<br>最后一段。<br>(本章完)</div>'
                 @contextmanager
                 def source_page(*_): yield page
@@ -384,7 +518,7 @@ class TranslationTest(unittest.TestCase):
                                     body=chapter if '/txt/' in route.request.url else fixture)
                         page.route('**/*', serve)
                         title, links = reader_crawl.collect_shuba_list('https://www.69shuba.com/book/999.htm', '69shuba-999', browser)
-                        self.assertEqual((title, [item[0] for item in links]), ('作品', ['2', '1']))
+                        self.assertEqual((title, [item[0] for item in links]), ('作品', ['1', '2']))
                         paragraphs = reader_crawl.extract_episode(browser, 'https://www.69shuba.com/txt/999/1', '69shuba-999', '1')
                         self.assertEqual(paragraphs, ['原文段落。' * 20, '最后一段。'])
                         before = len(documents)

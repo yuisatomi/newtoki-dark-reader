@@ -18,7 +18,7 @@ import reader_translate
 from reader_crawl import (CrawlUnavailable, HumanVerificationRequired, LockedChapter,
                           HOSTS, SHUBA_HOSTS, WORK_ID_PATTERN, checked_host, supported_host, checked_url,
                           collect_episode_list, extract_episode, source_browser, shuba_work, valid_work_id, work_url,
-                          ready_verification_pages)
+                          ready_verification_pages, chronological_shuba_chapters)
 
 
 HTML_PATH = Path(__file__).with_name("reader_app.html")
@@ -128,7 +128,24 @@ def init_db(connect):
         db.execute("CREATE INDEX IF NOT EXISTS reader_episode_order ON reader_episodes(work_id, ordinal)")
         if 'run_token' not in {row[1] for row in db.execute('PRAGMA table_info(reader_jobs)')}:
             db.execute("ALTER TABLE reader_jobs ADD COLUMN run_token TEXT NOT NULL DEFAULT ''")
+        repair_shuba_order(db)
     reader_translate.init_db(connect)
+
+
+def repair_shuba_order(db, work_id=None):
+    works = [work_id] if work_id else [row[0] for row in db.execute(
+        "SELECT DISTINCT work_id FROM reader_episodes WHERE work_id LIKE '69shuba-%'")]
+    changed = 0
+    for key in works:
+        if not shuba_work(key):
+            continue
+        chapters = [tuple(row) for row in db.execute(
+            'SELECT episode_id,title,source_url FROM reader_episodes WHERE work_id=? ORDER BY ordinal', (key,))]
+        ordered = chronological_shuba_chapters(chapters)
+        if ordered != chapters:
+            changed += db.executemany('UPDATE reader_episodes SET ordinal=? WHERE work_id=? AND episode_id=? AND ordinal!=?',
+                                      [(ordinal, key, chapter[0], ordinal) for ordinal, chapter in enumerate(ordered, 1)]).rowcount
+    return changed
 
 
 def respond(handler, status, payload, cookie=None):
@@ -603,6 +620,7 @@ def handle_post(handler, connect, token, store_progress, delete_progress):
                     VALUES(?,?,?,?,?,?,?,?)''', (work_id, episode['episode_id'], episode['ordinal'], episode['title'],
                     episode['source_url'], json.dumps(paragraphs, ensure_ascii=False) if paragraphs else None,
                     'ready' if paragraphs else 'missing', now))
+            repair_shuba_order(db, work_id)
             reader_translate.restore(db, work_id, backup['translations'])
             # Bump the current server revision, never reuse the backup's old revision.
             delete_progress(db, 'novel', work_id, clear=True)

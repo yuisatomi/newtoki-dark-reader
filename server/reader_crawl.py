@@ -404,6 +404,19 @@ class ShubaLinks(HTMLParser):
                 self.links.setdefault(eid, (eid, title, url))
 
 
+def chronological_shuba_chapters(chapters):
+    chapters = list(chapters)
+    numbers = []
+    for _, title, _ in chapters:
+        match = re.match(r'^\s*第\s*([0-9]+)\s*章', title)
+        if match:
+            numbers.append(int(match[1]))
+    # Reverse only an unambiguous descending sequence, keeping notes with their neighbors.
+    if len(numbers) > 1 and all(left > right for left, right in zip(numbers, numbers[1:])):
+        chapters.reverse()
+    return chapters
+
+
 def collect_shuba_list(source_url, work_id, browser):
     host, _, _ = checked_url(source_url, work_id)
     url = work_url(host, work_id)
@@ -420,7 +433,7 @@ def collect_shuba_list(source_url, work_id, browser):
             raise CrawlUnavailable('회차 목록을 찾지 못했습니다.')
         title = (page.locator('h1').first.text_content() or '').strip() if page.locator('h1').count() else ''
         title = title or re.split(r'最新章节|无弹窗|[-_]', parser.title)[0].strip()
-        return title, list(parser.links.values())
+        return title, chronological_shuba_chapters(parser.links.values())
 
 
 def _collect_episode_list(source_url, work_id, delay, browser):
