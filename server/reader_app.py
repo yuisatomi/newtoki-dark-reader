@@ -17,7 +17,8 @@ import reader_translate
 
 from reader_crawl import (CrawlUnavailable, HumanVerificationRequired, LockedChapter,
                           HOSTS, SHUBA_HOSTS, WORK_ID_PATTERN, checked_host, supported_host, checked_url,
-                          collect_episode_list, extract_episode, source_browser, shuba_work, valid_work_id, work_url)
+                          collect_episode_list, extract_episode, source_browser, shuba_work, valid_work_id, work_url,
+                          ready_verification_pages)
 
 
 HTML_PATH = Path(__file__).with_name("reader_app.html")
@@ -319,6 +320,40 @@ def verification_message(db, work_id):
     row = db.execute("""SELECT p.error FROM reader_paused_sources p
         JOIN reader_works w ON w.host=p.host WHERE w.work_id=?""", (work_id,)).fetchone()
     return row["error"] if row else ""
+
+
+def resume_source(db, host):
+    db.execute('DELETE FROM reader_paused_sources WHERE host=?', (host,))
+    db.execute("""UPDATE reader_jobs SET state='queued',error='',attempts=0,updated_at=?
+        WHERE state='verification' AND work_id IN (SELECT work_id FROM reader_works WHERE host=?)""",
+               (int(time.time() * 1000), host))
+    db.execute("""UPDATE reader_episodes SET state='missing',error=''
+        WHERE state='verification' AND work_id IN (SELECT work_id FROM reader_works WHERE host=?)""", (host,))
+
+
+def resume_completed_verifications(connect):
+    with connect() as db:
+        waiting = db.execute("""SELECT w.host,j.work_id,j.episode_id,j.run_token FROM reader_jobs j
+            JOIN reader_works w ON w.work_id=j.work_id JOIN reader_paused_sources p ON p.host=w.host
+            WHERE j.state='verification' AND NOT EXISTS (
+                SELECT 1 FROM reader_work_settings s WHERE s.work_id=j.work_id AND s.paused=1)""").fetchall()
+    if not waiting:
+        return
+    ready = ready_verification_pages({row['host'] for row in waiting})
+    if not ready:
+        return
+    with connect() as db:
+        db.execute('BEGIN IMMEDIATE')
+        for row in waiting:
+            host, work_id, episode_id, token = row['host'], row['work_id'], row['episode_id'], row['run_token']
+            if (host, work_id, episode_id) not in ready:
+                continue
+            current = db.execute("""SELECT 1 FROM reader_jobs j JOIN reader_works w ON w.work_id=j.work_id
+                WHERE j.work_id=? AND j.episode_id=? AND j.run_token=? AND j.state='verification' AND w.host=?
+                AND NOT EXISTS (SELECT 1 FROM reader_work_settings s WHERE s.work_id=j.work_id AND s.paused=1)""",
+                                 (work_id, episode_id, token, host)).fetchone()
+            if current:
+                resume_source(db, host)
 
 
 def handle_get(handler, connect, token):
@@ -676,13 +711,7 @@ def handle_post(handler, connect, token, store_progress, delete_progress):
             if not work or not work["host"]:
                 respond(handler, 404, {"error": "출처를 먼저 선택하세요."})
                 return
-            db.execute("DELETE FROM reader_paused_sources WHERE host=?", (work["host"],))
-            db.execute("""UPDATE reader_jobs SET state='queued',error='',attempts=0,updated_at=?
-                WHERE state='verification' AND work_id IN (SELECT work_id FROM reader_works WHERE host=?)""",
-                       (int(time.time() * 1000), work["host"]))
-            db.execute("""UPDATE reader_episodes SET state='missing',error=''
-                WHERE state='verification' AND work_id IN (SELECT work_id FROM reader_works WHERE host=?)""",
-                       (work["host"],))
+            resume_source(db, work["host"])
         respond(handler, 200, {"ok": True})
         return
     match = REFRESH_PATH.fullmatch(path)
@@ -828,8 +857,12 @@ def start_worker(connect):
         db.execute("UPDATE reader_jobs SET state='queued' WHERE state='running'")
 
     def loop():
+        next_verification_check = 0
         while True:
             try:
+                if time.monotonic() >= next_verification_check:
+                    next_verification_check = time.monotonic() + 10
+                    resume_completed_verifications(connect)
                 run_one_job(connect)
                 time.sleep(1)  # One serial worker: leave a gap even after successful collection.
             except Exception:

@@ -686,6 +686,116 @@ class ReaderAppTest(unittest.TestCase):
             reader_app.queue_prefetch(db,'9000','249')
             self.assertEqual({r[0] for r in db.execute("SELECT episode_id FROM reader_jobs WHERE work_id='9000'")},{'249','250'})
 
+    def test_browser_verification_updates_without_manual_resume(self):
+        from playwright.sync_api import expect, sync_playwright
+        executable = os.environ.get('READER_TEST_BROWSER', r'C:\Program Files\Google\Chrome\Application\chrome.exe')
+        if not Path(executable).exists():
+            self.skipTest('Local Chromium is unavailable')
+        self.login()
+        self.request('/app/api/works', {'url': 'https://newtoki1.org/novel/2999'})
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True, executable_path=executable)
+            try:
+                context = browser.new_context()
+                context.add_cookies([{'name': self.cookie.split('=', 1)[0], 'value': self.cookie.split('=', 1)[1], 'url': self.base}])
+                page = context.new_page()
+                resumes = []
+                page.on('request', lambda request: resumes.append(request.url) if request.url.endswith('/resume') else None)
+                for reading in (False, True):
+                    with reader_sync.connect() as db:
+                        db.execute("INSERT INTO reader_paused_sources VALUES('newtoki1.org','접속 확인 대기')")
+                        db.execute("UPDATE reader_jobs SET state='verification' WHERE work_id='2999'")
+                        db.execute("UPDATE reader_episodes SET state='verification',paragraphs_json=NULL WHERE work_id='2999'")
+                    page.goto(self.base + '/app?work=2999' + ('&ep=1' if reading else ''))
+                    message = page.locator('#reader-message' if reading else '#work-message')
+                    expect(message).to_contain_text('접속 확인 대기')
+                    with reader_sync.connect() as db:
+                        reader_app.resume_source(db, 'newtoki1.org')
+                        db.execute("""INSERT OR REPLACE INTO reader_episodes(work_id,episode_id,ordinal,title,source_url,
+                            paragraphs_json,state,error,updated_at) VALUES('2999','1',1,'1화','https://newtoki1.org/novel/2999/1',?,'ready','',1)""",
+                                   (json.dumps(['자동 재개 본문 ' * 30]),))
+                    if reading:
+                        expect(page.locator('#content p')).to_have_count(1, timeout=6000)
+                    else:
+                        expect(page.locator('#episode-list button')).to_have_count(1, timeout=6000)
+                    expect(message).not_to_contain_text('접속 확인 대기')
+                self.assertEqual(resumes, [])
+            finally:
+                browser.close()
+
+    def test_automatic_verification_waits_for_content(self):
+        from playwright.sync_api import TimeoutError as BrowserTimeout
+        response = Mock(headers={'cf-mitigated': 'challenge'}, status=403)
+        page = Mock()
+        page.title.return_value = 'Just a moment...'
+        reader_crawl.check_browser_response(response, page)
+        page.wait_for_function.assert_called_once()
+        page.reload.assert_not_called()
+        page.click.assert_not_called()
+        page.wait_for_function.side_effect = BrowserTimeout('still checking')
+        with self.assertRaises(reader_crawl.HumanVerificationRequired):
+            reader_crawl.check_browser_response(response, page)
+        page.reset_mock()
+        page.title.return_value = 'Original error'
+        with self.assertRaisesRegex(reader_crawl.CrawlUnavailable, '403'):
+            reader_crawl.check_browser_response(Mock(headers={}, status=403), page)
+        page.wait_for_function.assert_not_called()
+
+    def test_completed_verification_resumes_only_matching_work(self):
+        self.login()
+        for work in ('11', '12'):
+            self.request('/app/api/works', {'url': 'https://toki32.com/novel/' + work})
+        with reader_sync.connect() as db:
+            db.execute("INSERT INTO reader_paused_sources VALUES('toki32.com','checking')")
+            db.execute("UPDATE reader_jobs SET state='verification',error='checking' WHERE work_id IN ('11','12')")
+            db.execute("INSERT INTO reader_work_settings(work_id,paused) VALUES('11',1),('12',1)")
+        with patch.object(reader_app, 'ready_verification_pages', return_value=set()) as probe:
+            reader_app.resume_completed_verifications(reader_sync.connect)
+            probe.assert_not_called()
+            with reader_sync.connect() as db:
+                db.execute('UPDATE reader_work_settings SET paused=0')
+            reader_app.resume_completed_verifications(reader_sync.connect)
+            self.assertTrue(self.request('/app/api/work/11')[1]['verification'])
+            probe.return_value = {('toki32.com', '999', '')}
+            reader_app.resume_completed_verifications(reader_sync.connect)
+            self.assertTrue(self.request('/app/api/work/11')[1]['verification'])
+            # A source change during the browser check must not resume the old job.
+            def changed_source(_):
+                with reader_sync.connect() as db:
+                    db.execute("UPDATE reader_works SET host='toki33.com' WHERE work_id='11'")
+                return {('toki32.com', '11', '')}
+            probe.side_effect = changed_source
+            reader_app.resume_completed_verifications(reader_sync.connect)
+            with reader_sync.connect() as db:
+                self.assertEqual(db.execute('SELECT count(*) FROM reader_paused_sources').fetchone()[0], 1)
+            probe.side_effect = None
+            probe.return_value = {('toki32.com', '12', '')}
+            reader_app.resume_completed_verifications(reader_sync.connect)
+        self.assertFalse(self.request('/app/api/work/12')[1]['verification'])
+        with reader_sync.connect() as db:
+            self.assertEqual(db.execute("SELECT state FROM reader_jobs WHERE work_id='12'").fetchone()[0], 'queued')
+            self.assertEqual(db.execute("SELECT state FROM reader_jobs WHERE work_id='11'").fetchone()[0], 'verification')
+
+    def test_ready_verification_pages_does_not_navigate(self):
+        ready = Mock(url='https://www.69shuba.com/txt/999/1')
+        ready.evaluate.return_value = True
+        waiting = Mock(url='https://www.69shuba.com/txt/999/2')
+        waiting.evaluate.return_value = False
+        unrelated = Mock(url='https://evil.invalid/txt/999/1')
+        other_host = Mock(url='https://toki32.com/novel/999/1')
+        browser = Mock(contexts=[Mock(pages=[ready, waiting, unrelated, other_host])])
+        with patch.dict(os.environ, {'READER_BROWSER_CDP': 'http://127.0.0.1:9222'}), \
+                patch.object(reader_crawl, 'source_browser') as connect:
+            connect.return_value.__enter__.return_value = browser
+            self.assertEqual(reader_crawl.ready_verification_pages({'www.69shuba.com'}),
+                             {('www.69shuba.com', '69shuba-999', '1')})
+        for page in (ready, waiting, unrelated, other_host):
+            page.goto.assert_not_called()
+            page.reload.assert_not_called()
+            page.click.assert_not_called()
+        unrelated.evaluate.assert_not_called()
+        other_host.evaluate.assert_not_called()
+
     def test_verification_pauses_source_until_authenticated_resume(self):
         self.login()
         for work_id, host in (("11", "toki32.com"), ("12", "toki32.com"), ("13", "newtoki1.org")):
@@ -1427,12 +1537,12 @@ class ReaderAppTest(unittest.TestCase):
                 with reader_sync.connect() as db:
                     db.execute("INSERT INTO reader_paused_sources VALUES('newtoki1.org','서버 브라우저에서 사람 확인이 필요합니다.')")
                 direct.goto(self.base + "/app?work=999")
-                expect(direct.locator("#work-message button")).to_have_text("확인 완료 · 재개")
+                expect(direct.locator("#work-message button")).to_have_text("다시 확인 · 재개")
                 direct.locator("#episode-list button").first.click()
                 expect(direct.locator("#content p").first).to_have_text("첫 문단")
                 direct.locator("#next").click()
                 direct.locator("#next").click()
-                expect(direct.locator("#reader-message button")).to_have_text("확인 완료 · 재개")
+                expect(direct.locator("#reader-message button")).to_have_text("다시 확인 · 재개")
                 direct.locator("#reader-message button").click()
                 expect(direct.locator("#reader-message")).to_have_text("수집 실패")
                 with reader_sync.connect() as db:

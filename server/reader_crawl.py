@@ -21,6 +21,29 @@ WORK_ID_PATTERN = r"(?:[0-9]{1,128}|69shuba-[0-9]{1,100})"
 USER_AGENT = "ReaderSync/1.0"
 EPISODE_PATH = re.compile(r"^/novel/([0-9]+)/([0-9]+)$")
 WORK_PATH = re.compile(r"^/novel/([0-9]+)(?:/([0-9]+))?/?$")
+VERIFICATION_WAIT_MS = 30000
+BROWSER_CONTENT_READY = r"""() => {
+  if (/Just a moment/i.test(document.title)) return false;
+  const path = location.pathname;
+  if (/^\/book\/\d+(?:\/|\.htm)?$/.test(path)) {
+    const id = path.match(/\d+/)[0];
+    return [...document.querySelectorAll('a[href]')].some(a => {
+      const url = new URL(a.href, location.href);
+      return url.origin === location.origin && new RegExp('^/txt/' + id + '/[0-9]+/?$').test(url.pathname);
+    });
+  }
+  if (/^\/novel\/\d+\/?$/.test(path))
+    return !!document.querySelector('a.item-subject, a.novel-ep-link');
+  if (/^\/txt\/\d+\/\d+\/?$/.test(path))
+    return (document.querySelector('.txtnav')?.textContent || '').trim().length > 80;
+  if (!/^\/novel\/\d+\/\d+\/?$/.test(path)) return false;
+  try {
+    if (JSON.parse(document.querySelector('#theme-novel-viewer-data')?.textContent || '{}').paidGate?.locked) return true;
+  } catch (_) {}
+  const host = document.querySelector('[data-theme-novel-content], .theme-novel-content, .novel-viewer > div:last-child');
+  const root = window.__readerShadows?.get(host) || host?.shadowRoot || host;
+  return (root?.textContent || '').trim().length > 80;
+}"""
 
 
 def supported_host(host):
@@ -65,7 +88,7 @@ class LockedChapter(Exception):
 
 class HumanVerificationRequired(CrawlUnavailable):
     def __init__(self):
-        super().__init__("서버 브라우저에서 사이트의 사람 확인을 완료한 뒤 재개하세요.")
+        super().__init__("사이트의 접속 확인이 아직 끝나지 않았습니다.")
 
 
 def browser_endpoint():
@@ -142,9 +165,36 @@ def source_page(browser, url, work_id):
 def check_browser_response(response, page):
     if (response and response.headers.get("cf-mitigated") == "challenge"
             or "Just a moment" in page.title()):
-        raise HumanVerificationRequired()
+        from playwright.sync_api import TimeoutError as BrowserTimeout
+        try:
+            # The original 403/header remains stale after the browser's automatic check.
+            page.wait_for_function(BROWSER_CONTENT_READY, timeout=VERIFICATION_WAIT_MS)
+        except BrowserTimeout:
+            raise HumanVerificationRequired() from None
+        return
     if not response or response.status >= 400:
         raise CrawlUnavailable(f"원본 페이지 응답 {response.status if response else '없음'}")
+
+
+def ready_verification_pages(hosts):
+    if not hosts or not browser_endpoint():
+        return set()
+    from playwright.sync_api import Error as BrowserError
+    ready = set()
+    try:
+        with source_browser() as browser:
+            for context in browser.contexts:
+                for page in context.pages:
+                    try:
+                        url = page.url
+                        host, work_id, episode_id = checked_url(url)
+                        if host in hosts and page.evaluate(BROWSER_CONTENT_READY) and page.url == url:
+                            ready.add((host, work_id, episode_id or ''))
+                    except (ValueError, BrowserError):
+                        continue
+    except (CrawlUnavailable, BrowserError):
+        pass  # A browser restart must not block collection from other sources.
+    return ready
 
 
 def checked_url(url, work_id=None):

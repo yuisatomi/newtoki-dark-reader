@@ -281,14 +281,24 @@ class TranslationTest(unittest.TestCase):
                 page = context.new_page()
                 fixture = '<title>书最新章节</title><h1>作品</h1><a href="/txt/999/2">第二章</a><a href="/txt/999/1">第一章</a>'
                 chapter = '<div class="txtnav"><h1>标题</h1><div class="txtinfo">广告信息</div><script>bad()</script><button>按钮</button>' + ('原文段落。' * 20) + '<br>最后一段。<br>(本章完)</div>'
-                page.route('**/*', lambda route: route.fulfill(status=200, content_type='text/html; charset=utf-8', body=chapter if '/txt/' in route.request.url else fixture))
                 @contextmanager
                 def source_page(*_): yield page
                 with patch.object(reader_crawl, 'source_page', source_page):
-                    title, links = reader_crawl.collect_shuba_list('https://www.69shuba.com/book/999.htm', '69shuba-999', browser)
-                    self.assertEqual((title, [item[0] for item in links]), ('作品', ['2', '1']))
-                    paragraphs = reader_crawl.extract_episode(browser, 'https://www.69shuba.com/txt/999/1', '69shuba-999', '1')
-                    self.assertEqual(paragraphs, ['原文段落。' * 20, '最后一段。'])
+                    for automatic_check in (False, True):
+                        def serve(route):
+                            if automatic_check and 'approved=1' not in route.request.url:
+                                route.fulfill(status=403, content_type='text/html; charset=utf-8',
+                                    headers={'cf-mitigated': 'challenge'}, body='<title>Just a moment...</title>'
+                                    '<script>setTimeout(()=>location.replace(location.pathname+"?approved=1"),200)</script>')
+                            else:
+                                route.fulfill(status=200, content_type='text/html; charset=utf-8',
+                                    body=chapter if '/txt/' in route.request.url else fixture)
+                        page.route('**/*', serve)
+                        title, links = reader_crawl.collect_shuba_list('https://www.69shuba.com/book/999.htm', '69shuba-999', browser)
+                        self.assertEqual((title, [item[0] for item in links]), ('作品', ['2', '1']))
+                        paragraphs = reader_crawl.extract_episode(browser, 'https://www.69shuba.com/txt/999/1', '69shuba-999', '1')
+                        self.assertEqual(paragraphs, ['原文段落。' * 20, '最后一段。'])
+                        page.unroute('**/*', serve)
                 context.close()
             finally:
                 browser.close()
