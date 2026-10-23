@@ -12,6 +12,7 @@ from urllib.parse import parse_qs, urlparse
 
 import reader_app
 import reader_auth
+import reader_translate
 
 
 DB_PATH = os.environ.get("SYNC_DB", "/var/lib/reader-sync/progress.db")
@@ -217,7 +218,7 @@ class Handler(BaseHTTPRequestHandler):
             with connect() as db:
                 rows = db.execute(
                     "SELECT kind, work_id, episode_id, position, title, device_id, updated_at, deleted, revision "
-                    "FROM progress ORDER BY updated_at DESC"
+                    "FROM progress WHERE NOT(kind='novel' AND work_id GLOB '69shuba-*') ORDER BY updated_at DESC"
                 ).fetchall()
             self.send_json(200, {"progress": [dict(row) for row in rows]})
             return
@@ -322,4 +323,5 @@ if __name__ == "__main__":
         if not SYNC_TOKEN and not reader_auth.account(connect):
             raise SystemExit('Configure an owner with --set-password or provide SYNC_TOKEN for migration')
         reader_app.start_worker(connect)
+        reader_translate.start_worker(connect)
         ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()

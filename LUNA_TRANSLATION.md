@@ -1,0 +1,62 @@
+# 69shuba 원문 수집과 Luna 번역
+
+서버형 `/app` 전용 기능이다. 기존 사용자 스크립트와 `main` 배포는 변경하지 않는다. 중국어 원문을 미리 수집하고, 실제 연 회차만 한국어로 번역한다. 번역은 전체 완료 후 표시하며 다른 기기와 같은 캐시를 사용한다.
+
+## 사용 순서
+
+1. 서버에 새 소스와 `server/requirements-app.txt`의 의존성을 설치한다. 기존 DB는 유지한다.
+2. 작품 추가에 `https://www.69shuba.com/book/58953.htm`처럼 작품·목록·회차 URL을 입력한다.
+3. 사람 확인 안내가 나오면 기존 서버 브라우저에서 직접 완료한 뒤 `확인 후 재개`를 누른다. CAPTCHA를 자동 해결하지 않는다.
+4. 아래 연결 도우미로 번역용 ChatGPT 계정을 서버에 연결한다. 기기마다 연결할 필요는 없다.
+5. 회차를 열면 저장된 원문을 `gpt-6-luna` / 추론 `none`으로 번역한다. 실패 시 `번역 다시 시도` 또는 `원문 미리보기`를 선택한다. 원문 미리보기에서는 한국어 읽기 위치를 저장하지 않는다.
+
+목록·원문 수집은 번역을 요청하지 않는다. 작품·미열람 회차 제목은 원문을 유지하며 읽는 회차 제목은 본문과 함께 번역한다. 다른 모델이나 API 키로 자동 대체하지 않는다. 이미 시작된 번역은 화면을 떠나도 캐시로 완료될 수 있다.
+
+## PC에서 ChatGPT 연결
+
+먼저 서버와 PC에 `PyJWT[crypto]==2.15.1`을 설치한다. PC의 Python 환경과 프로젝트 소스에서 실행한다. 기존 SSH 키는 공개키가 LXC에 등록되어 있고 호스트 키가 검증된 상태여야 한다.
+
+```powershell
+python -m pip install 'PyJWT[crypto]==2.15.1'
+python server/reader_openai.py connect --ssh root@192.168.100.118 --identity-file C:/Users/moon/.ssh/reader-lxc108_ed25519
+```
+
+기본 브라우저에서 **Continue with ChatGPT** 로그인과 플랜 사용 승인을 완료한다. 연결 도우미는 로컬 `127.0.0.1` 콜백, PKCE, state·nonce와 ID 토큰 서명·issuer·audience·계정·만료를 검증한다. 처음 발급된 client ID를 재사용하며 `dynamic_agent_client`를 저장된 client ID로 사용하지 않는다.
+
+연결 도우미는 SSH를 통해 서비스 사용자로 인증 정보를 가져온다. 서버의 소스 경로 `/opt/reader-sync/reader_openai.py`, Python `/opt/reader-sync/venv/bin/python`, 사용자 `reader-sync`를 사용한다. SSH 개인키나 ChatGPT 토큰을 화면에 복사하지 않는다. 성공 후 앱의 `계정·기기 → 중국 소설 번역 · ChatGPT 연결 → 연결 상태 새로고침`에서 확인한다.
+
+재연결은 같은 명령을 다시 실행한다. 다른 ChatGPT 계정으로 바꾸려면 `--new-account`를 추가한다. 새 인증과 Luna 사용 권한 검증이 모두 성공하기 전에는 기존 서버 연결을 교체하지 않는다.
+
+## 인증 보관과 오류
+
+- 서버 보관 경로: `/var/lib/reader-sync/openai/` (필요한 경우 `READER_OPENAI_DIR`). 서비스 사용자만 접근하는 디렉터리와 0600 인증 파일을 사용한다. 서버 호스트 ID와 계정 등록을 구분하고 재시작 후에도 유지한다.
+- 서버가 액세스 토큰을 갱신하며 회전하는 refresh token은 잠금 안에서 함께 저장한다. 인증 정보는 DB·작품 백업·브라우저 저장소·로그·Git에 넣지 않는다.
+- 호출 경로는 `https://api.openai.com/v1/responses`이며 `store=false`, `stream=true`를 사용한다. 최종 완료 이벤트와 문단 ID·개수·빈 결과를 검증한 응답만 저장한다.
+- 인증 만료 시 한 번 갱신·재요청한다. 사용 한도·권한 없음·네트워크 중단·형식 오류는 자동 반복하지 않고 직접 재시도한다. 완료된 묶음은 재사용한다. ChatGPT 플랜 사용 한도가 적용되며 API 요금표를 구독 사용량으로 환산하지 않는다.
+- 연결 해제는 새 번역을 중지하고 인증 토큰을 지운다. 원격 해제를 확인하지 못한 경우 앱에 안내하며 ChatGPT 설정에서도 앱 접근을 해제할 수 있다. 저장된 번역은 남는다.
+
+공식 안내: [자체 호스팅](https://developers.openai.com/siwc/token-sharing-open-source/self-hosted-vms), [OAuth 등록](https://developers.openai.com/siwc/token-sharing-open-source/sign-in), [모델·호출](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference), [갱신·해제](https://developers.openai.com/siwc/token-sharing-open-source/profiles-and-sessions).
+
+## 저장·관리와 호환성
+
+- 작품 키는 `69shuba-58953` 형식이다. 기존 숫자 ID·읽기 기록은 그대로이며 중국 소설은 스크립트용 `/v1/progress` 전체 목록에서 제외한다.
+- 원문은 기존 본문 테이블, 번역은 추가된 `reader_translations` 테이블에 저장한다. 언어·원문 해시·모델·번역 지시 버전별로 구분한다. 원문이 달라지면 옛 번역을 완성본으로 표시하지 않는다.
+- 원문 수집은 기존 순차 실행·간격·재시도·일시정지 정책을 따른다. 번역은 별도의 단일 워커가 처리하므로 미리 수집 대열 뒤에서 기다리지 않는다.
+- 작품 관리에서 원문 저장 수·한국어 번역 수·합산 용량을 확인한다. 저장 한도는 원문과 번역을 합쳐 계산한다. 본문 삭제 및 전체 삭제는 대기·진행 중 번역 결과의 재저장도 차단한다.
+- 기존 작품은 버전 1 백업을 유지한다. 중국 소설은 원문·완료된 번역을 담은 버전 2를 사용한다. 복원은 원문 해시·문단·출처를 검증하며 수집을 일시정지하고 기존 revision을 증가시킨다. OAuth 정보는 포함하지 않는다.
+
+## 개발 검증과 운영 반영
+
+```powershell
+python test-translation.py -q
+python test-app.py -q
+python test-auth.py -q
+python server/reader_sync.py --self-test
+./test-server.ps1
+```
+
+브라우저 검사는 Playwright와 설치된 Chrome을 사용한다. 필요하면 `READER_TEST_BROWSER`에 브라우저 실행 파일 경로를 지정한다. 자동 검사는 임시 DB와 모의 원본·OpenAI 응답만 사용하며 실제 로그인·구독 사용량을 소비하지 않는다.
+
+2026-10-23 구현 검증: 신규 18개 검사, 기존 앱 25개 검사와 인증 6개 검사, 서버 self-test·통합 검사를 통과했다. 기존 앱 검사에서 저장 한도 입력 이름의 회귀 1건을 수정한 뒤 해당 브라우저 검사를 재통과했다. 실서비스의 OAuth 공개 메타데이터(issuer·JWKS·revocation 주소)는 일치함을 확인했다. 실제 ChatGPT 계정의 승인·Luna 사용 권한·번역 품질과 실사이트 본문 수집은 운영 연결 후 별도로 확인해야 한다. LXC 사전 조사에서 목록은 서버 브라우저로 조회됐으나 첫 회차 본문은 Cloudflare 사람 확인 대기였다.
+
+커밋·운영 배포는 별도 요청으로 진행한다. 배포 전 코드와 DB를 백업하고 서버 의존성·새 모듈을 함께 반영한다. 롤백 시 번역 워커를 중지하고 이전 코드로 복구하며 현재 DB와 추가 테이블을 유지한다. 구형 앱은 중국 작품을 지원하지 않으므로 롤백 기간에는 해당 작품을 열지 않는다. DB 전체를 옛 백업으로 덮어쓰지 않는다.

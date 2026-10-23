@@ -12,18 +12,22 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import reader_auth
+import reader_openai
+import reader_translate
 
 from reader_crawl import (CrawlUnavailable, HumanVerificationRequired, LockedChapter,
-                          HOSTS, checked_host, supported_host, checked_url, collect_episode_list, extract_episode, source_browser)
+                          HOSTS, SHUBA_HOSTS, WORK_ID_PATTERN, checked_host, supported_host, checked_url,
+                          collect_episode_list, extract_episode, source_browser, shuba_work, valid_work_id, work_url)
 
 
 HTML_PATH = Path(__file__).with_name("reader_app.html")
-WORK_PATH = re.compile(r"^/app/api/work/([0-9]+)$")
-SOURCE_PATH = re.compile(r"^/app/api/work/([0-9]+)/source$")
-REFRESH_PATH = re.compile(r"^/app/api/work/([0-9]+)/refresh$")
-RESUME_PATH = re.compile(r"^/app/api/work/([0-9]+)/resume$")
-EPISODE_PATH = re.compile(r"^/app/api/episode/([0-9]+)/([0-9]+)$")
-RETRY_PATH = re.compile(r"^/app/api/episode/([0-9]+)/([0-9]+)/retry$")
+WORK_PATH = re.compile(rf"^/app/api/work/({WORK_ID_PATTERN})$")
+SOURCE_PATH = re.compile(rf"^/app/api/work/({WORK_ID_PATTERN})/source$")
+REFRESH_PATH = re.compile(rf"^/app/api/work/({WORK_ID_PATTERN})/refresh$")
+RESUME_PATH = re.compile(rf"^/app/api/work/({WORK_ID_PATTERN})/resume$")
+EPISODE_PATH = re.compile(rf"^/app/api/episode/({WORK_ID_PATTERN})/([0-9]{{1,128}})$")
+RETRY_PATH = re.compile(rf"^/app/api/episode/({WORK_ID_PATTERN})/([0-9]{{1,128}})/retry$")
+TRANSLATE_PATH = re.compile(rf"^/app/api/episode/({WORK_ID_PATTERN})/([0-9]{{1,128}})/translate$")
 BACKUP_LIMIT = 32 * 1024 * 1024
 
 
@@ -123,6 +127,7 @@ def init_db(connect):
         db.execute("CREATE INDEX IF NOT EXISTS reader_episode_order ON reader_episodes(work_id, ordinal)")
         if 'run_token' not in {row[1] for row in db.execute('PRAGMA table_info(reader_jobs)')}:
             db.execute("ALTER TABLE reader_jobs ADD COLUMN run_token TEXT NOT NULL DEFAULT ''")
+    reader_translate.init_db(connect)
 
 
 def respond(handler, status, payload, cookie=None):
@@ -176,6 +181,7 @@ def queue_prefetch(db, work_id, episode_id):
 
 def set_work_source(db, work_id, host):
     """Caller holds a write transaction; discard results from the previous source."""
+    work_url(host, work_id)
     previous = db.execute('SELECT host FROM reader_works WHERE work_id=?', (work_id,)).fetchone()
     db.execute('INSERT OR IGNORE INTO reader_sources(host) VALUES(?)', (host,))
     changed = previous is None or previous['host'] != host
@@ -190,15 +196,16 @@ def set_work_source(db, work_id, host):
         db.execute('DELETE FROM reader_jobs WHERE work_id=?', (work_id,))
         db.execute("""UPDATE reader_episodes SET source_url=?||episode_id,
             state=CASE WHEN state='ready' THEN state ELSE 'missing' END,error=''
-            WHERE work_id=?""", (f'https://{host}/novel/{work_id}/', work_id))
+                    WHERE work_id=?""", (work_url(host, work_id, '0')[:-1], work_id))
         enqueue(db, work_id, force=True)
         for row in pending:
             enqueue(db, work_id, row['episode_id'])
 
 
-def source_hosts(db):
+def source_hosts(db, work_id=None):
     rows = db.execute("SELECT host FROM reader_sources UNION SELECT host FROM reader_works WHERE host!=''")
-    return sorted(HOSTS | {row[0] for row in rows if supported_host(row[0])})
+    hosts = HOSTS | {row[0] for row in rows if supported_host(row[0])}
+    return sorted(host for host in hosts if work_id is None or (host in SHUBA_HOSTS) == shuba_work(work_id))
 
 
 def work_settings(db, work_id):
@@ -226,7 +233,7 @@ def save_settings(db, work_id, settings):
 
 def cache_bytes(db, work_id):
     return db.execute('SELECT COALESCE(sum(length(CAST(paragraphs_json AS BLOB))),0) FROM reader_episodes WHERE work_id=?',
-                      (work_id,)).fetchone()[0]
+                      (work_id,)).fetchone()[0] + reader_translate.stored_bytes(db, work_id)
 
 
 def export_work(db, work_id):
@@ -245,21 +252,27 @@ def export_work(db, work_id):
     result = {'format': 'reader-work', 'version': 1,
               'work': dict(work) if work else {'work_id': work_id, 'host': '', 'title': progress['title']},
               'settings': work_settings(db, work_id), 'progress': dict(progress) if progress else None, 'episodes': episodes}
+    if shuba_work(work_id):
+        result.update(version=2, translations=reader_translate.export_ready(db, work_id))
     if len(json.dumps({'backup': result, 'confirm': True}, ensure_ascii=False).encode()) > BACKUP_LIMIT - 1024:
         raise ValueError('앱 백업은 작품당 32 MB까지 지원합니다. 큰 작품은 서버 DB 백업을 이용하세요.')
     return result
 
 
 def checked_backup(data):
-    if not isinstance(data, dict) or data.get('format') != 'reader-work' or type(data.get('version')) is not int or data['version'] != 1:
+    if not isinstance(data, dict) or data.get('format') != 'reader-work' or type(data.get('version')) is not int or data['version'] not in (1, 2):
         raise ValueError('지원하지 않는 백업 파일입니다.')
     work = data.get('work')
-    if not isinstance(work, dict) or not isinstance(work.get('work_id'), str) or not re.fullmatch(r'[0-9]{1,128}', work['work_id']):
+    if not isinstance(work, dict) or not valid_work_id(work.get('work_id')):
         raise ValueError('작품 ID가 올바르지 않습니다.')
     work_id = work['work_id']
     host = work.get('host')
     if host != '' and not supported_host(host):
         raise ValueError('지원하지 않는 작품 출처입니다.')
+    if (data['version'] == 2) != shuba_work(work_id) or (shuba_work(work_id) and not host):
+        raise ValueError('백업 버전과 작품 출처가 일치하지 않습니다.')
+    if host:
+        work_url(host, work_id)
     def title(value):
         if not isinstance(value, str) or len(value) > 2000:
             raise ValueError('제목이 올바르지 않습니다.')
@@ -284,7 +297,8 @@ def checked_backup(data):
         if (url_work, url_episode) != (work_id, eid):
             raise ValueError('회차 주소와 작품 ID가 다릅니다.')
         if paragraphs is not None and (not isinstance(paragraphs, list) or not paragraphs
-                or not all(isinstance(p, str) for p in paragraphs)):
+                or not all(isinstance(p, str) for p in paragraphs)
+                or (data['version'] == 2 and not all(p.strip() for p in paragraphs))):
             raise ValueError('본문은 문자열 문단 목록이어야 합니다.')
         result['episodes'].append(dict(episode_id=eid, ordinal=ordinal, title=title(item.get('title')), source_url=url, paragraphs=paragraphs))
         seen.add(eid)
@@ -297,6 +311,7 @@ def checked_backup(data):
         if not isinstance(eid, str) or not re.fullmatch(r'[0-9]{1,128}', eid) or type(position) not in (int, float) or not 0 <= position <= 1:
             raise ValueError('읽기 위치가 올바르지 않습니다.')
         result['progress'] = dict(episode_id=eid, position=position, title=title(progress.get('title')))
+    result['translations'] = reader_translate.checked_backup(data.get('translations', []), result['episodes']) if data['version'] == 2 else []
     return result
 
 
@@ -328,6 +343,9 @@ def handle_get(handler, connect, token):
         return
     if not reader_auth.session(handler, connect, token):
         respond(handler, 401, {"error": "로그인이 필요합니다."})
+        return
+    if path == '/app/api/translation/account':
+        respond(handler, 200, reader_openai.account_status())
         return
     with connect() as db:
         if path == '/app/api/manage/resources':
@@ -374,7 +392,13 @@ def handle_get(handler, connect, token):
                 LEFT JOIN cache c ON c.work_id=k.work_id LEFT JOIN jobs j ON j.work_id=k.work_id
                 LEFT JOIN reader_work_settings s ON s.work_id=k.work_id
                 ORDER BY title,k.work_id""").fetchall()
-            respond(handler, 200, {'works': [dict(row) for row in rows], 'sources': source_hosts(db)})
+            works = [dict(row) for row in rows]
+            for item in works:
+                item['sources'] = source_hosts(db, item['work_id'])
+                item['translated'] = db.execute("SELECT count(DISTINCT episode_id) FROM reader_translations WHERE work_id=? AND state='ready'", (item['work_id'],)).fetchone()[0]
+                item['translation_bytes'] = reader_translate.stored_bytes(db, item['work_id'])
+                item['bytes'] += item['translation_bytes']
+            respond(handler, 200, {'works': works, 'sources': source_hosts(db)})
             return
         if path == '/app/api/devices':
             rows = db.execute('''SELECT id,kind,name,created_at,last_seen,expires_at FROM reader_credentials
@@ -411,7 +435,7 @@ def handle_get(handler, connect, token):
             episodes = db.execute("SELECT episode_id,ordinal,title,state,error FROM reader_episodes WHERE work_id=? ORDER BY ordinal", (work_id,)).fetchall()
             job = db.execute("SELECT state,error FROM reader_jobs WHERE work_id=? AND episode_id=''", (work_id,)).fetchone()
             respond(handler, 200, {"work": dict(work) if work else None,
-                                   "sources": source_hosts(db),
+                                   "sources": source_hosts(db, work_id),
                                    "progress": dict(progress) if progress else None,
                                    "episodes": [dict(row) for row in episodes],
                                    "list_job": dict(job) if job else None,
@@ -421,6 +445,10 @@ def handle_get(handler, connect, token):
         match = EPISODE_PATH.fullmatch(path)
         if match:
             work_id, episode_id = match.groups()
+            language = parse_qs(urlparse(handler.path).query).get('language', ['ko'])[0]
+            if language not in ('ko', 'zh'):
+                respond(handler, 400, {'error': '지원하지 않는 읽기 언어입니다.'})
+                return
             row = db.execute("SELECT * FROM reader_episodes WHERE work_id=? AND episode_id=?", (work_id, episode_id)).fetchone()
             if not row:
                 respond(handler, 404, {"error": "회차 목록을 먼저 불러오세요."})
@@ -430,7 +458,13 @@ def handle_get(handler, connect, token):
             result = dict(row)
             content = result.pop("paragraphs_json")
             result["paragraphs"] = json.loads(content) if content else None
+            translation = reader_translate.status(db, row) if shuba_work(work_id) else None
+            if translation is not None and language == 'ko':
+                result['paragraphs'] = translation.pop('paragraphs', None)
+            elif translation is not None:
+                translation.pop('paragraphs', None)
             respond(handler, 200, {"episode": result, "job": dict(job) if job else None,
+                                   "translation": translation, "language": language,
                                    "paused": bool(work_settings(db, work_id)['paused']),
                                    "verification": verification_message(db, work_id)})
             return
@@ -467,6 +501,36 @@ def handle_post(handler, connect, token, store_progress, delete_progress):
         status, payload, cookie = managed
         respond(handler, status, payload, cookie)
         return
+    if path == '/app/api/translation/disconnect':
+        try:
+            message = reader_openai.disconnect()
+        except reader_openai.OpenAIError as error:
+            respond(handler, 400, {'error': str(error)})
+            return
+        with connect() as db:
+            db.execute("UPDATE reader_translations SET state='error',error='ChatGPT 연결이 해제되었습니다.',code='auth',run_token='' WHERE state IN ('queued','running')")
+        respond(handler, 200, {'ok': True, 'message': message})
+        return
+    match = TRANSLATE_PATH.fullmatch(path)
+    if match:
+        work_id, episode_id = match.groups()
+        if not shuba_work(work_id) or type(data.get('retry', False)) is not bool:
+            respond(handler, 400, {'error': '지원하지 않는 번역 요청입니다.'})
+            return
+        with connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            episode = db.execute('SELECT * FROM reader_episodes WHERE work_id=? AND episode_id=?', (work_id, episode_id)).fetchone()
+            if not episode:
+                respond(handler, 404, {'error': '회차 목록을 먼저 불러오세요.'})
+                return
+            try:
+                result = reader_translate.enqueue(db, episode, data.get('retry', False))
+            except ValueError as error:
+                respond(handler, 409, {'error': str(error)})
+                return
+            result.pop('paragraphs', None)
+            respond(handler, 200, {'translation': result})
+        return
     if path == '/app/api/manage/sources':
         try:
             host = checked_host(data.get('host'))
@@ -489,7 +553,7 @@ def handle_post(handler, connect, token, store_progress, delete_progress):
         work_id, now = work['work_id'], int(time.time() * 1000)
         with connect() as db:
             db.execute('BEGIN IMMEDIATE')
-            for table in ('reader_jobs', 'reader_episodes'):
+            for table in ('reader_translations', 'reader_jobs', 'reader_episodes'):
                 db.execute(f'DELETE FROM {table} WHERE work_id=?', (work_id,))
             db.execute('''INSERT INTO reader_works(work_id,host,title,updated_at) VALUES(?,?,?,?)
                 ON CONFLICT(work_id) DO UPDATE SET host=excluded.host,title=excluded.title,updated_at=excluded.updated_at''',
@@ -502,6 +566,7 @@ def handle_post(handler, connect, token, store_progress, delete_progress):
                     VALUES(?,?,?,?,?,?,?,?)''', (work_id, episode['episode_id'], episode['ordinal'], episode['title'],
                     episode['source_url'], json.dumps(paragraphs, ensure_ascii=False) if paragraphs else None,
                     'ready' if paragraphs else 'missing', now))
+            reader_translate.restore(db, work_id, backup['translations'])
             # Bump the current server revision, never reuse the backup's old revision.
             delete_progress(db, 'novel', work_id, clear=True)
             if backup['progress']:
@@ -514,7 +579,7 @@ def handle_post(handler, connect, token, store_progress, delete_progress):
         return
     if path in ('/app/api/manage/cache-clear', '/app/api/manage/retry', '/app/api/manage/settings'):
         work_id = data.get('work_id')
-        if not isinstance(work_id, str) or not re.fullmatch(r'[0-9]{1,128}', work_id):
+        if not valid_work_id(work_id):
             respond(handler, 400, {'error': '작품 ID가 필요합니다.'})
             return
         try:
@@ -536,6 +601,7 @@ def handle_post(handler, connect, token, store_progress, delete_progress):
             elif path.endswith('/cache-clear'):
                 # Invalidate running body jobs too; their late results must not refill the cache.
                 db.execute("DELETE FROM reader_jobs WHERE work_id=? AND episode_id!=''", (work_id,))
+                db.execute('DELETE FROM reader_translations WHERE work_id=?', (work_id,))
                 db.execute("UPDATE reader_episodes SET paragraphs_json=NULL,state=CASE WHEN state='ready' THEN 'missing' ELSE state END WHERE work_id=?", (work_id,))
                 settings = work_settings(db, work_id)
                 settings['paused'] = 1
@@ -556,7 +622,7 @@ def handle_post(handler, connect, token, store_progress, delete_progress):
         with connect() as db:
             db.execute('BEGIN IMMEDIATE')
             delete_progress(db, 'novel', work_id, clear=True)
-            for table in ('reader_jobs', 'reader_episodes', 'reader_works', 'reader_work_settings'):
+            for table in ('reader_translations', 'reader_jobs', 'reader_episodes', 'reader_works', 'reader_work_settings'):
                 db.execute(f'DELETE FROM {table} WHERE work_id=?', (work_id,))
         respond(handler, 200, {'ok': True})
         return
@@ -589,6 +655,7 @@ def handle_post(handler, connect, token, store_progress, delete_progress):
         work_id = match.group(1)
         try:
             host = checked_host(data.get('host'))
+            work_url(host, work_id)
         except ValueError as exc:
             respond(handler, 400, {"error": str(exc)})
             return
@@ -684,13 +751,16 @@ def run_one_job(connect):
         if not work or not work["host"]:
             raise CrawlUnavailable("작품 출처가 없습니다.")
         if not episode_id:
-            title, chapters = collect_episode_list(f"https://{work['host']}/novel/{work_id}", work_id)
+            title, chapters = collect_episode_list(work_url(work['host'], work_id), work_id)
             with connect() as db:
                 if not current_job(db, work_id, episode_id, run_token):
                     return True
                 now = int(time.time() * 1000)
                 db.execute("UPDATE reader_works SET title=?,updated_at=? WHERE work_id=?", (title, now, work_id))
                 for ordinal, (chapter_id, chapter_title, url) in enumerate(chapters, 1):
+                    db.execute('''DELETE FROM reader_translations WHERE work_id=? AND episode_id=? AND EXISTS (
+                        SELECT 1 FROM reader_episodes WHERE work_id=? AND episode_id=? AND title!=?)''',
+                        (work_id, chapter_id, work_id, chapter_id, chapter_title))
                     db.execute("""
                         INSERT INTO reader_episodes(work_id,episode_id,ordinal,title,source_url,updated_at)
                         VALUES(?,?,?,?,?,?) ON CONFLICT(work_id,episode_id) DO UPDATE SET
@@ -710,6 +780,9 @@ def run_one_job(connect):
                     db.execute("UPDATE reader_jobs SET state='capacity',error='이 회차를 저장하면 본문 저장 한도를 초과합니다. 작품 관리에서 한도를 늘리세요.' WHERE work_id=? AND episode_id=?",
                                (work_id, episode_id))
                     return True
+                current_title = db.execute('SELECT title FROM reader_episodes WHERE work_id=? AND episode_id=?', (work_id, episode_id)).fetchone()[0]
+                db.execute('DELETE FROM reader_translations WHERE work_id=? AND episode_id=? AND source_hash!=?',
+                           (work_id, episode_id, reader_translate.fingerprint(current_title, paragraphs)))
                 db.execute("""
                     UPDATE reader_episodes SET paragraphs_json=?,state='ready',error='',updated_at=?
                     WHERE work_id=? AND episode_id=?

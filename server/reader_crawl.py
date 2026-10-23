@@ -15,14 +15,35 @@ from urllib.parse import parse_qs, urljoin, urlparse
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 
-HOSTS = {"newtoki1.org", "toki32.com"}
+SHUBA_HOSTS = {"www.69shuba.com", "69shuba.com"}
+HOSTS = {"newtoki1.org", "toki32.com", "www.69shuba.com"}
+WORK_ID_PATTERN = r"(?:[0-9]{1,128}|69shuba-[0-9]{1,100})"
 USER_AGENT = "ReaderSync/1.0"
 EPISODE_PATH = re.compile(r"^/novel/([0-9]+)/([0-9]+)$")
 WORK_PATH = re.compile(r"^/novel/([0-9]+)(?:/([0-9]+))?/?$")
 
 
 def supported_host(host):
-    return isinstance(host, str) and re.fullmatch(r'(?:newtoki[0-9]{1,6}\.org|toki[0-9]{1,6}\.com)', host) is not None
+    return isinstance(host, str) and (host in SHUBA_HOSTS or re.fullmatch(r'(?:newtoki[0-9]{1,6}\.org|toki[0-9]{1,6}\.com)', host) is not None)
+
+
+def shuba_work(work_id):
+    return isinstance(work_id, str) and re.fullmatch(r'69shuba-[0-9]{1,100}', work_id) is not None
+
+
+def valid_work_id(work_id):
+    return isinstance(work_id, str) and re.fullmatch(WORK_ID_PATTERN, work_id) is not None
+
+
+def work_url(host, work_id, episode_id=None):
+    if not valid_work_id(work_id) or (host in SHUBA_HOSTS) != shuba_work(work_id) or not supported_host(host):
+        raise ValueError('같은 사이트 계열의 출처만 선택할 수 있습니다.')
+    if episode_id is not None and not re.fullmatch(r'[0-9]{1,128}', episode_id):
+        raise ValueError('회차 ID가 올바르지 않습니다.')
+    if shuba_work(work_id):
+        upstream = work_id.removeprefix('69shuba-')
+        return f'https://{host}/txt/{upstream}/{episode_id}' if episode_id is not None else f'https://{host}/book/{upstream}/'
+    return f'https://{host}/novel/{work_id}' + (f'/{episode_id}' if episode_id is not None else '')
 
 
 def checked_host(value):
@@ -30,7 +51,7 @@ def checked_host(value):
         raise ValueError('수집 도메인을 입력하세요.')
     host = value.strip().lower()
     if not supported_host(host):
-        raise ValueError('newtoki숫자.org 또는 toki숫자.com 형식의 도메인만 입력하세요. URL·포트·내부 주소는 사용할 수 없습니다.')
+        raise ValueError('newtoki숫자.org, toki숫자.com 또는 www.69shuba.com 도메인만 입력하세요. URL·포트·내부 주소는 사용할 수 없습니다.')
     return host
 
 
@@ -128,13 +149,18 @@ def check_browser_response(response, page):
 
 def checked_url(url, work_id=None):
     parsed = urlparse(url)
-    match = WORK_PATH.fullmatch(parsed.path)
+    is_shuba = parsed.hostname in SHUBA_HOSTS
+    match = (re.fullmatch(r'/book/([0-9]{1,100})(?:\.htm|/)?', parsed.path)
+             or re.fullmatch(r'/txt/([0-9]{1,100})/([0-9]{1,128})/?', parsed.path)) if is_shuba else WORK_PATH.fullmatch(parsed.path)
     if (parsed.scheme != "https" or not supported_host(parsed.hostname) or parsed.port is not None
             or parsed.username or parsed.password or not match):
         raise ValueError("허용된 소설 주소만 입력하세요.")
-    if work_id and match.group(1) != work_id:
+    key = '69shuba-' + match.group(1) if is_shuba else match.group(1)
+    if work_id and key != work_id:
         raise ValueError("다른 작품으로 이동했습니다.")
-    return parsed.hostname, match.group(1), match.group(2)
+    if not valid_work_id(key):
+        raise ValueError('작품 ID가 올바르지 않습니다.')
+    return parsed.hostname, key, match.group(2) if match.lastindex == 2 else None
 
 
 class SameSiteRedirect(HTTPRedirectHandler):
@@ -286,8 +312,63 @@ def fetch_index_page(url, work_id, browser=None):
 
 
 def collect_episode_list(source_url, work_id, delay=0.7):
-    with source_browser() if browser_endpoint() else nullcontext(None) as browser:
+    with source_browser() if browser_endpoint() or shuba_work(work_id) else nullcontext(None) as browser:
+        if shuba_work(work_id):
+            return collect_shuba_list(source_url, work_id, browser)
         return _collect_episode_list(source_url, work_id, delay, browser)
+
+
+class ShubaLinks(HTMLParser):
+    def __init__(self, work_id, base):
+        super().__init__(convert_charrefs=True)
+        self.work_id, self.base, self.links = work_id, base, {}
+        self.title, self.anchor, self.in_title = '', None, False
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == 'title':
+            self.in_title = True
+        if tag == 'a' and attrs.get('href'):
+            self.anchor = [urljoin(self.base, attrs['href']), []]
+
+    def handle_data(self, data):
+        if self.in_title:
+            self.title += data
+        if self.anchor:
+            self.anchor[1].append(data)
+
+    def handle_endtag(self, tag):
+        if tag == 'title':
+            self.in_title = False
+        if tag == 'a' and self.anchor:
+            url, parts = self.anchor
+            self.anchor = None
+            try:
+                _, _, eid = checked_url(url, self.work_id)
+            except ValueError:
+                return
+            title = ' '.join(''.join(parts).split())
+            if eid and title:
+                self.links.setdefault(eid, (eid, title, url))
+
+
+def collect_shuba_list(source_url, work_id, browser):
+    host, _, _ = checked_url(source_url, work_id)
+    url = work_url(host, work_id)
+    with source_page(browser, url, work_id) as page:
+        response = page.goto(url, wait_until='domcontentloaded', timeout=30000)
+        check_browser_response(response, page)
+        _, _, episode = checked_url(page.url, work_id)
+        if episode:
+            raise CrawlUnavailable('작품 목록이 다른 페이지로 이동했습니다.')
+        page.wait_for_selector(f'a[href*="/txt/{work_id.removeprefix("69shuba-")}/"]', state='attached', timeout=30000)
+        parser = ShubaLinks(work_id, page.url)
+        parser.feed(page.content())
+        if not parser.links:
+            raise CrawlUnavailable('회차 목록을 찾지 못했습니다.')
+        title = (page.locator('h1').first.text_content() or '').strip() if page.locator('h1').count() else ''
+        title = title or re.split(r'最新章节|无弹窗|[-_]', parser.title)[0].strip()
+        return title, list(parser.links.values())
 
 
 def _collect_episode_list(source_url, work_id, delay, browser):
@@ -341,6 +422,19 @@ def extract_episode(browser, url, work_id, episode_id):
         _, _, final_episode = checked_url(page.url, work_id)
         if final_episode != episode_id:
             raise CrawlUnavailable("요청한 회차가 다른 페이지로 이동했습니다.")
+        if shuba_work(work_id):
+            page.wait_for_selector('.txtnav', state='attached', timeout=30000)
+            paragraphs = page.evaluate(r'''() => {
+              const root=document.querySelector('.txtnav')?.cloneNode(true);
+              if(!root)return [];
+              root.querySelectorAll('script,style,button,iframe,ins,nav,h1,.txtinfo,.bottom-ad,.ads,.ad').forEach(el=>el.remove());
+              root.querySelectorAll('br').forEach(el=>el.replaceWith('\n'));
+              root.querySelectorAll('p,div').forEach(el=>el.append('\n'));
+              return root.textContent.split(/\n+/).map(s=>s.trim()).filter(s=>s && !/^[(（]本章完[)）]$/.test(s));
+            }''')
+            if not paragraphs or sum(map(len, paragraphs)) < 80:
+                raise CrawlUnavailable('본문을 찾지 못했습니다.')
+            return paragraphs
         cfg = page.locator("#theme-novel-viewer-data")
         if cfg.count():
             data = json.loads(cfg.text_content() or "{}")

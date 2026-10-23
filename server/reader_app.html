@@ -115,7 +115,7 @@
   <p class="muted">전체 삭제는 읽은 회차·위치, 회차 목록, 저장 본문과 수집 작업을 제거합니다. 다른 기기에는 다음 동기화 때 반영됩니다. 재업로드 방지용 삭제 표시와 기존 서버 백업은 남습니다.</p>
   <section class="card"><h2>수집 도메인 등록</h2>
     <form id="source-add-form" class="toolbar"><input id="source-add-host" aria-label="새 수집 도메인" placeholder="예: toki33.com" maxlength="80" autocapitalize="none" spellcheck="false" required><button>도메인 등록</button></form>
-    <p class="muted">newtoki숫자.org · toki숫자.com 계열을 지원합니다. https://와 경로 없이 도메인만 입력하세요. 등록 후 아래 작품에서 선택해야 적용됩니다. 접속 성공이나 사람 확인 통과를 보장하지 않습니다.</p>
+    <p class="muted">newtoki숫자.org · toki숫자.com · www.69shuba.com을 지원합니다. https://와 경로 없이 입력하세요. 작품의 같은 사이트 계열 안에서 출처를 변경할 수 있습니다.</p>
   </section>
   <details class="card"><summary>작품 백업 파일 복원</summary>
     <p class="muted">작품별 JSON 파일(최대 32 MB)을 복원합니다. 같은 작품의 목록·본문·읽은 위치를 교체하며, 다른 작품과 계정은 유지합니다. 복원 후 수집은 일시정지됩니다. 백업은 암호화되지 않으므로 안전하게 보관하세요.</p>
@@ -127,6 +127,15 @@
 <main class="shell hidden" id="account">
   <header><h1>계정·연결된 기기</h1><button id="account-back">읽던 작품</button></header>
   <p>한 소유자의 모든 기기가 같은 읽기 기록을 공유합니다.</p>
+  <section class="card" id="translation-account">
+    <h2>중국 소설 번역 · ChatGPT 연결</h2>
+    <p>GPT-6 Luna로 실제 여는 회차만 한국어로 번역합니다. 원문 미리 수집은 번역 사용량을 소모하지 않습니다. 저장된 번역은 모든 기기에서 재사용합니다.</p>
+    <p id="translation-account-status" class="message" role="status"></p>
+    <button id="translation-account-refresh">연결 상태 새로고침</button>
+    <button id="translation-account-disconnect" disabled>ChatGPT 연결 해제</button>
+    <p class="muted">최초 연결·재인증은 PC용 연결 도우미에서 한 번 진행합니다. 승인한 계정의 ChatGPT 사용 한도가 적용됩니다. 연결 후 이 화면에서 상태를 새로고침하세요.</p>
+    <a href="https://github.com/yuisatomi/newtoki-dark-reader/blob/source/LUNA_TRANSLATION.md" target="_blank" rel="noopener noreferrer">PC 연결 도우미 사용 방법</a>
+  </section>
   <details class="card" id="account-details">
     <summary id="account-heading">소유자 계정 설정</summary>
     <form id="account-form">
@@ -151,6 +160,7 @@
 <article id="reader" class="hidden">
   <h1 id="reader-title"></h1>
   <p class="muted">좌측 여백: 한 화면 위로 · 우측 여백: 한 화면 아래로</p>
+  <button id="reader-language" class="hidden">원문 미리보기</button>
   <p class="message" id="reader-message"></p>
   <div id="content"></div>
   <aside id="progress-notice" class="hidden" aria-label="최신 읽기 기록">
@@ -176,7 +186,7 @@
 <script>
 (() => {
   const $ = id => document.getElementById(id);
-  const state = { workId:'', episodeId:'', work:null, remote:null, writable:false, reading:false, manualSaving:false, saveCancelled:false, transitionFrom:'', poll:null, save:null, saving:Promise.resolve(), workRequest:0 };
+  const state = { workId:'', episodeId:'', language:'ko', work:null, remote:null, writable:false, reading:false, manualSaving:false, saveCancelled:false, transitionFrom:'', poll:null, save:null, saving:Promise.resolve(), workRequest:0 };
   let navScrollY=0, navKeepUntil=0;
   let resourcesTimer=null, resourcesLoading=false, progressChecking=false;
   function setNavVisible(visible) {
@@ -284,7 +294,7 @@
         card.append(node('h2',row.title));
         const read=row.episode_id ? (row.episode_title || '회차 제목 미수집')+' · '+Math.round(row.position*100)+'% 지점' : '읽기 기록 없음';
         card.append(node('p','읽은 위치: '+read));
-        card.append(node('p',`회차 목록 ${row.total}개 · 본문 저장 ${row.ready}개 · 잠김 ${row.locked}개`));
+        card.append(node('p',`회차 목록 ${row.total}개 · 본문 저장 ${row.ready}개 · 잠김 ${row.locked}개`+(row.work_id.startsWith('69shuba-')?` · 한국어 번역 ${row.translated}개`:'')));
         const cached=node('details','');cached.className='cached-episodes';
         const cachedSummary=node('summary',`저장된 회차 보기 (${row.ready}개)`);
         const cachedStatus=node('p','');cachedStatus.className='message';cachedStatus.setAttribute('role','status');
@@ -309,7 +319,7 @@
         const sourceForm=node('form','');sourceForm.className='toolbar';
         const sourceSelect=node('select','');sourceSelect.required=true;sourceSelect.setAttribute('aria-label','수집 도메인');
         if(!row.host){const empty=node('option','도메인 선택');empty.value='';sourceSelect.append(empty);}
-        for(const host of result.sources){const option=node('option',host);option.value=host;sourceSelect.append(option);}
+        for(const host of row.sources || result.sources){const option=node('option',host);option.value=host;sourceSelect.append(option);}
         sourceSelect.value=row.host||'';
         const sourceLabel=node('label','수집 도메인 ');sourceLabel.append(sourceSelect);
         const sourceButton=node('button','도메인 변경');sourceButton.disabled=!sourceSelect.value||sourceSelect.value===row.host;
@@ -360,7 +370,7 @@
         const ahead=node('input','');ahead.type='number';ahead.min=0;ahead.max=200;ahead.step=1;ahead.value=row.prefetch;ahead.required=true;
         const cap=node('input','');cap.type='number';cap.min=0;cap.max=1024;cap.step=1;cap.value=row.cache_limit_mb;cap.required=true;
         const aheadLabel=node('label','미리 수집할 다음 회차 수 ');aheadLabel.append(ahead);
-        const capLabel=node('label','본문 저장 한도 (MB) ');capLabel.append(cap);
+        const capLabel=node('label',row.work_id.startsWith('69shuba-')?'원문·번역 저장 한도 (MB) ':'본문 저장 한도 (MB) ');capLabel.append(cap);
         const settingsButton=node('button','수집 설정 저장');
         settings.append(aheadLabel,node('p',''),capLabel,node('p','현재 회차는 별도로 수집합니다. 미리 수집 0~200회, 저장 한도 0은 제한 없음. 한도에 도달해도 기존 본문은 삭제하지 않습니다. 설정은 새 수집 요청부터 적용되며 이미 대기 중인 작업은 남습니다.'),settingsButton);
         settings.onsubmit=e=>{e.preventDefault();change(settingsButton,'settings',{settings:{paused:row.paused,prefetch:Number(ahead.value),cache_limit_mb:Number(cap.value)}},'수집 설정을 저장했습니다.');};
@@ -395,7 +405,7 @@
       const file=$('restore-file').files[0];
       if(!file || file.size>32*1024*1024)throw new Error('32 MB 이하의 백업 파일을 선택하세요.');
       const backup=JSON.parse(await file.text());
-      if(backup.format!=='reader-work'||backup.version!==1||!backup.work)throw new Error('작품 백업 파일이 아닙니다.');
+      if(backup.format!=='reader-work'||![1,2].includes(backup.version)||!backup.work)throw new Error('작품 백업 파일이 아닙니다.');
       if(!confirm(`「${backup.work.title}」 (작품 ${backup.work.work_id}) 데이터를 복원할까요?\n서버에 같은 작품이 있으면 읽은 위치·목록·본문을 이 파일로 교체합니다. 되돌리려면 현재 데이터를 먼저 백업하세요.`))return;
       await api('manage/restore',{backup,confirm:true});
       state.work=null;state.remote=null;$('restore-file').value='';
@@ -409,12 +419,27 @@
     $('login-help').textContent=info.configured ? '아이디와 비밀번호로 로그인하세요.'
       : '최초 한 번 기존 토큰으로 로그인한 뒤 계정을 설정하세요. 토큰을 모르면 서버 콘솔에서 계정을 만들 수 있습니다.';
   }
+  async function refreshTranslationAccount() {
+    try {
+      const info=await api('translation/account');
+      note('translation-account-status',(info.connected ? (info.email || '연결된 계정')+' · '+info.model+(info.model_available?' 사용 가능':' 사용 권한 확인 필요') : 'ChatGPT 연결 필요')+(info.error?' · '+info.error:''));
+      $('translation-account-disconnect').disabled=!info.registered&&!info.connected;
+    } catch(error) {note('translation-account-status',error.message);}
+  }
+  $('translation-account-refresh').onclick=refreshTranslationAccount;
+  $('translation-account-disconnect').onclick=async()=>{
+    if(!confirm('ChatGPT 번역 연결을 해제할까요? 저장된 원문·번역과 읽기 기록은 유지됩니다.'))return;
+    const button=$('translation-account-disconnect');button.disabled=true;
+    try {const result=await api('translation/disconnect',{});await refreshTranslationAccount();note('translation-account-status',result.message);}
+    catch(error){note('translation-account-status',error.message);button.disabled=false;}
+  };
   async function accountScreen() {
     await savePosition(false); clearTimeout(state.save); clearPoll(); state.workRequest++;
     $('settings').classList.add('hidden'); show('account');
     try {
       loginFields(await api('me'));
       if(!authInfo.authenticated) {show('login');return;}
+      await refreshTranslationAccount();
       $('account-username').value=authInfo.username||'';
       $('account-heading').textContent=authInfo.configured?'아이디·비밀번호 변경':'소유자 계정 만들기';
       $('account-details').open=!authInfo.configured;
@@ -490,7 +515,7 @@
       note('library-message','');
     } catch(e) {note('library-message',e.message);}
   }
-  async function openWork(workId, desiredEpisode='') {
+  async function openWork(workId, desiredEpisode='', language='ko') {
     clearTimeout(state.save);
     if(!$('reader').classList.contains('hidden')) await savePosition(false);
     if(state.workId!==workId) {
@@ -526,7 +551,7 @@
           : result.episodes.length ? '저장된 회차 목록 '+result.episodes.length+'개' : '저장된 회차 목록이 없습니다.');
         note('work-collection-status',job?.state==='error' ? '목록 갱신 실패 · '+job.error
           : pending ? (result.episodes.length?'새 회차 목록 갱신 중…':'회차 목록 수집 중…')+(job.error?' · '+job.error:'') : '');
-        if(desiredEpisode && result.episodes.some(x=>x.episode_id===desiredEpisode)) return openEpisode(desiredEpisode);
+        if(desiredEpisode && result.episodes.some(x=>x.episode_id===desiredEpisode)) return openEpisode(desiredEpisode,language);
         const saved=list.querySelector('.current');
         if(!positioned && saved) {saved.scrollIntoView({block:'center'});positioned=true;}
         if(result.paused) {
@@ -534,7 +559,7 @@
           const manage=node('button','작품 관리');manage.onclick=manageScreen;$('work-message').append(manage);
           return;
         }
-        if(result.verification) {verification('work-message',result.verification,()=>openWork(workId,desiredEpisode));return;}
+        if(result.verification) {verification('work-message',result.verification,()=>openWork(workId,desiredEpisode,language));return;}
         if(pending)poll(()=>refresh());
       } catch(e) {if(current())note(initial?'work-message':'work-collection-status','목록 조회 실패 · '+e.message);}
     }
@@ -607,10 +632,12 @@
       if(current())note('progress-notice-text','최신 읽기 기록 확인 실패: '+e.message+' · 이동 버튼을 다시 눌러주세요.');
     } finally {button.disabled=false;button.textContent='최신 읽던 회차로 이동';}
   };
-  async function openEpisode(episodeId) {
+  async function openEpisode(episodeId, language='ko') {
     clearPoll(); clearTimeout(state.save);
-    if(!$('reader').classList.contains('hidden') && state.episodeId!==episodeId) await savePosition(false);
+    if(!$('reader').classList.contains('hidden') && (state.episodeId!==episodeId || state.language!==language)) await savePosition(false);
     const previous=state.episodeId; state.episodeId=episodeId; state.reading=false;
+    state.language=state.workId.startsWith('69shuba-')&&language==='zh'?'zh':'ko';
+    language=state.language;
     if(previous!==episodeId)state.saveCancelled=false;
     const request=++state.workRequest;
     const workId=state.workId;
@@ -626,21 +653,28 @@
     progressNotice();
     $('current-episode').textContent='회차 확인 중…'; $('current-episode').title='';
     $('manual-save').disabled=true; $('save-feedback').textContent='';
+    $('reader-language').classList.toggle('hidden',!workId.startsWith('69shuba-'));
+    $('reader-language').textContent=language==='zh'?'한국어로 읽기':'원문 미리보기';
     setNavVisible(true);
-    history.replaceState({},'', '/app?work='+workId+'&ep='+episodeId);
+    history.replaceState({},'', '/app?work='+workId+'&ep='+episodeId+(language==='zh'?'&language=zh':''));
     try {
-      const info=await api('episode/'+workId+'/'+episodeId);
+      const info=await api('episode/'+workId+'/'+episodeId+(workId.startsWith('69shuba-')?'?language='+language:''));
       if(state.workId!==workId || state.episodeId!==episodeId || state.workRequest!==request) return;
       const chapter=state.work.episodes.find(x=>x.episode_id===episodeId);
-      $('reader-title').textContent=chapter?.title || info.episode.title;
-      const episodeTitle=chapter?.title || info.episode.title || '';
-      const number=episodeTitle.match(/(?:^|\s|제)(\d+(?:\.\d+)?)\s*[화회]/);
+      const episodeTitle=(language==='ko' && info.translation?.title) || chapter?.title || info.episode.title || '';
+      $('reader-title').textContent=episodeTitle;
+      const number=episodeTitle.match(/(?:^|\s|제|第)(\d+(?:\.\d+)?)\s*[화회장章]/);
       $('current-episode').textContent=number ? '현재 '+number[1]+'화' : '현재 목록 '+info.episode.ordinal+'번째';
       $('current-episode').title=episodeTitle;
       updateEpisodeNavigation();
       const content=$('content'); content.replaceChildren();
       if(info.episode.state==='ready' && info.episode.paragraphs?.length) {
         for(const paragraph of info.episode.paragraphs) content.append(node('p',paragraph));
+        if(language==='zh') {
+          state.writable=false;
+          note('reader-message','중국어 원문 미리보기입니다. 한국어 읽기 위치는 변경하지 않습니다.');
+          return;
+        }
         note('reader-message',state.writable?'':state.saveCancelled ? '저장을 취소하여 자동 저장을 멈췄습니다. 다시 저장하려면 저장 버튼을 누르세요.' : state.remote?.deleted
           ? '삭제된 기록입니다. 다시 저장하려면 저장 버튼을 누르세요.'
           : '서버에는 다른 회차가 저장되어 있습니다. 이 회차는 로컬에서만 읽습니다.');
@@ -653,25 +687,48 @@
           $('manual-save').disabled=state.manualSaving;
           if(state.transitionFrom || !state.remote?.episode_id) savePosition(false);
         });
+      } else if(info.translation && language==='ko' && info.episode.state==='ready') {
+        const current=()=>state.workId===workId && state.episodeId===episodeId && state.workRequest===request;
+        let translation=info.translation;
+        if(translation.state==='missing') {
+          try {translation=(await api('episode/'+workId+'/'+episodeId+'/translate',{})).translation;}
+          catch(error){translation={state:'error',error:error.message};}
+          if(!current())return;
+        }
+        if(translation.state==='error') {
+          note('reader-message',translation.error || '번역하지 못했습니다. 직접 다시 시도하세요.');
+          const retry=node('button','번역 다시 시도');retry.id='retry-translation';
+          retry.onclick=async()=>{
+            retry.disabled=true;
+            try {await api('episode/'+workId+'/'+episodeId+'/translate',{retry:true});if(current())await openEpisode(episodeId);}
+            catch(error){if(current()){note('reader-message',error.message);retry.disabled=false;}}
+          };
+          content.append(retry);
+          const account=node('button','ChatGPT 연결 확인');account.onclick=accountScreen;content.append(account);
+        } else {
+          note('reader-message',(translation.state==='queued'?'번역 대기 중…':'번역 중…')+` ${translation.completed || 0}/${translation.total || 0} · 전체 번역이 끝나면 본문을 표시합니다.`);
+          poll(()=>openEpisode(episodeId,language));
+        }
       } else if(info.episode.state==='locked') {
         note('reader-message',info.episode.error || '잠긴 회차입니다.');
         const original=node('a','원본에서 확인'); original.href=info.episode.source_url; content.append(original);
       } else if(info.verification) {
-        verification('reader-message',info.verification,()=>openEpisode(episodeId));
+        verification('reader-message',info.verification,()=>openEpisode(episodeId,language));
       } else if(info.paused || info.job?.state==='capacity') {
         note('reader-message',info.paused?'수집이 일시정지되어 있습니다. 작품 관리에서 재개하세요.':info.job.error);
         const manage=node('button','작품 관리');manage.onclick=manageScreen;content.append(manage);
       } else if(info.episode.state==='error') {
         note('reader-message',info.episode.error || '본문 수집에 실패했습니다.');
-        const retry=node('button','다시 시도'); retry.onclick=async()=>{await api('episode/'+workId+'/'+episodeId+'/retry',{});openEpisode(episodeId);}; content.append(retry);
+        const retry=node('button','다시 시도'); retry.onclick=async()=>{await api('episode/'+workId+'/'+episodeId+'/retry',{});openEpisode(episodeId,language);}; content.append(retry);
         const original=node('a','원본에서 확인'); original.href=info.episode.source_url; content.append(original);
       } else {
-        note('reader-message',info.job?.error || '본문 수집 중…'); poll(()=>openEpisode(episodeId));
+        note('reader-message',info.job?.error || '본문 수집 중…'); poll(()=>openEpisode(episodeId,language));
       }
     } catch(e) {if(state.workRequest===request)note('reader-message',e.message);}
   }
+  $('reader-language').onclick=()=>openEpisode(state.episodeId,state.language==='zh'?'ko':'zh');
   async function savePosition(manual, keepalive=false) {
-    if(!state.reading||!state.workId||!state.episodeId||$('reader').classList.contains('hidden')) return;
+    if(!state.reading||state.language==='zh'||!state.workId||!state.episodeId||$('reader').classList.contains('hidden')) return;
     const workId=state.workId, episodeId=state.episodeId;
     const ratio=Math.max(0,Math.min(1,scrollY/Math.max(1,document.documentElement.scrollHeight-innerHeight)));
     try { sessionStorage.setItem('readerPosition:'+workId+':'+episodeId,String(ratio)); } catch (_) {}
@@ -779,7 +836,7 @@
     if(pair) {await accountScreen();$('pair-code').value=pair; if(authInfo.configured)await findPair(); return;}
     if(location.hash==='#devices') {await accountScreen();return;}
     const params=new URLSearchParams(location.search),work=params.get('work'),ep=params.get('ep');
-    if(work&&/^\d+$/.test(work)) openWork(work,ep||''); else library();
+    if(work&&/^(?:\d{1,128}|69shuba-\d{1,100})$/.test(work)) openWork(work,ep&&/^\d{1,128}$/.test(ep)?ep:'',params.get('language')==='zh'?'zh':'ko'); else library();
   }
   $('login-form').onsubmit=async e=>{e.preventDefault();try{
     await api('login',authInfo.configured?{username:$('username').value.trim(),password:$('password').value}:{token:$('token').value});
