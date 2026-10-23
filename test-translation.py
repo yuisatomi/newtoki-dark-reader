@@ -102,6 +102,93 @@ class TranslationTest(unittest.TestCase):
             self.assertEqual(call.call_count, 1)
         self.assertEqual(self.request('/app/api/manage')[1]['works'][0]['translated'], 1)
 
+    def test_translation_status_reports_last_stage_time(self):
+        base = self.source()
+        self.request(base + '/translate', {})
+        with reader_sync.connect() as db:
+            db.execute('UPDATE reader_translations SET updated_at=1')
+        queued = self.request(base)[1]['translation']
+        self.assertEqual((queued['state'], queued['updated_at']), ('queued', 1))
+        def translated(payload):
+            running = self.request(base)[1]['translation']
+            self.assertEqual(running['state'], 'running')
+            self.assertGreater(running['updated_at'], queued['updated_at'])
+            return self.fake_response(payload)
+        with patch.object(reader_openai, 'response_text', side_effect=translated):
+            reader_translate.run_one(reader_sync.connect)
+        self.assertEqual(self.request(base)[1]['translation']['state'], 'ready')
+
+    def test_browser_translation_polling_keeps_screen_and_explains_status(self):
+        from playwright.sync_api import expect, sync_playwright
+        executable = os.environ.get('READER_TEST_BROWSER', r'C:\Program Files\Google\Chrome\Application\chrome.exe')
+        if not Path(executable).exists(): self.skipTest('Local Chromium is unavailable')
+        base = self.source()
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True, executable_path=executable)
+            try:
+                for viewport in ({'width': 390, 'height': 844}, {'width': 1280, 'height': 900}):
+                    with reader_sync.connect() as db:
+                        db.execute('DELETE FROM reader_translations')
+                    context = browser.new_context(viewport=viewport)
+                    context.add_cookies([{'name': self.cookie.split('=', 1)[0], 'value': self.cookie.split('=', 1)[1], 'url': self.base}])
+                    page = context.new_page()
+                    requests = []
+                    page.on('request', lambda request: requests.append((request.method, urlparse(request.url).path)))
+                    page.goto(self.base + '/app?work=69shuba-999&ep=1')
+                    expect(page.locator('#reader-message')).to_contain_text('번역 대기')
+                    page.evaluate('''() => {
+                        window.readerMessages=[];window.readerScrolls=[];
+                        new MutationObserver(() => readerMessages.push(document.getElementById('reader-message').textContent))
+                            .observe(document.getElementById('reader-message'),{childList:true,subtree:true});
+                        window.scrollTo=(...args)=>readerScrolls.push(args);
+                    }''')
+                    page.wait_for_timeout(2300)
+                    self.assertFalse(any('본문 불러오는 중' in message for message in page.evaluate('readerMessages')))
+                    self.assertEqual(page.evaluate('readerScrolls'), [])
+                    expect(page.locator('#translation-progress')).to_contain_text('전체 1묶음 중 0묶음 완료')
+                    with reader_sync.connect() as db:
+                        db.execute("UPDATE reader_translations SET state='running',updated_at=?", (int(time.time()*1000)-65000,))
+                    expect(page.locator('#reader-message')).to_contain_text('번역 중', timeout=5000)
+                    expect(page.locator('#translation-progress')).to_contain_text('현재 단계 1분')
+                    expect(page.locator('#translation-progress')).to_contain_text('1번째 묶음 응답 대기')
+                    expect(page.locator('#manual-save')).to_be_disabled()
+                    page.route('**/app/api/episode/69shuba-999/1?language=ko', lambda route: route.abort())
+                    expect(page.locator('#reader-message')).to_contain_text('상태 확인 실패', timeout=5000)
+                    expect(page.locator('#reader-message')).to_contain_text('번역 실패로 확정된 것은 아닙니다')
+                    page.unroute('**/app/api/episode/69shuba-999/1?language=ko')
+                    expect(page.locator('#reader-message')).to_contain_text('번역 중', timeout=5000)
+                    with reader_sync.connect() as db:
+                        db.execute("UPDATE reader_translations SET state='error',code='quota',error='ChatGPT 사용 한도'")
+                    expect(page.locator('#reader-message')).to_contain_text('번역 실패', timeout=5000)
+                    expect(page.locator('#reader-message')).to_contain_text('ChatGPT 사용 한도')
+                    expect(page.locator('#translation-progress')).to_contain_text('자동 재시도하지 않습니다')
+                    expect(page.locator('#retry-translation')).to_be_visible()
+                    self.assertEqual(sum(method == 'POST' and path == base + '/translate' for method, path in requests), 1)
+                    with patch.object(reader_openai, 'response_text', side_effect=self.fake_response):
+                        page.locator('#retry-translation').click()
+                        page.wait_for_timeout(100)
+                        reader_translate.run_one(reader_sync.connect)
+                    expect(page.locator('#content p')).to_have_count(2, timeout=5000)
+                    expect(page.locator('#translation-progress')).to_be_hidden()
+                    expect(page.locator('#content p').first).to_contain_text('한국어 번역')
+                    expect(page.locator('#manual-save')).to_be_enabled()
+                    # A late Korean status response must not overwrite original preview.
+                    translated = self.request(base)[1]
+                    held = []
+                    page.route('**/app/api/episode/69shuba-999/1?language=ko', lambda route: held.append(route))
+                    page.reload(wait_until='domcontentloaded')
+                    page.wait_for_timeout(300)
+                    self.assertEqual(len(held), 1)
+                    page.locator('#reader-language').click()
+                    expect(page.locator('#reader-message')).to_contain_text('원문 미리보기')
+                    held[0].fulfill(status=200, json=translated)
+                    page.wait_for_timeout(200)
+                    expect(page.locator('#content p').first).to_contain_text('第一段')
+                    expect(page.locator('#manual-save')).to_be_disabled()
+                    context.close()
+            finally:
+                browser.close()
+
     def test_legacy_progress_and_source_family(self):
         self.source()
         self.assertEqual(self.request('/app/api/work/69shuba-999/source', {'host': 'newtoki1.org'})[0], 400)

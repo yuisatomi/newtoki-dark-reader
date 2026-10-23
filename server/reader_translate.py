@@ -96,7 +96,7 @@ def status(db, episode):
     if not row:
         return {'state': 'missing', 'model': MODEL, 'completed': 0, 'total': total, 'error': '', 'code': ''}
     return {'state': row['state'], 'model': row['model'], 'completed': total if row['state'] == 'ready' else len(json.loads(row['chunks_json'])),
-            'total': total, 'error': row['error'], 'code': row['code'], 'title': row['title'],
+            'total': total, 'error': row['error'], 'code': row['code'], 'title': row['title'], 'updated_at': row['updated_at'],
             'paragraphs': json.loads(row['paragraphs_json']) if row['state'] == 'ready' else None}
 
 
@@ -145,7 +145,8 @@ def run_one(connect):
         job = dict(row)
         key = tuple(job[field] for field in ('work_id', 'episode_id', 'source_hash', 'language', 'model', 'prompt_version'))
         token = secrets.token_hex(16)
-        db.execute("UPDATE reader_translations SET state='running',run_token=? WHERE " + KEY, (token, *key))
+        db.execute("UPDATE reader_translations SET state='running',run_token=?,updated_at=? WHERE " + KEY,
+                   (token, int(time.time() * 1000), *key))
         source = db.execute('SELECT * FROM reader_episodes WHERE work_id=? AND episode_id=?', key[:2]).fetchone()
     try:
         if not source or not source['paragraphs_json'] or episode_key(source) != key:

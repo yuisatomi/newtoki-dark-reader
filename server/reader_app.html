@@ -39,6 +39,7 @@
   .danger { border-color:#be5858; }
   .muted,.message { color:var(--muted); font-size:.85rem; }
   .message { min-height:1.6em; }
+  #translation-progress { white-space:pre-line; }
   .toolbar { margin:14px 0; }
   .toolbar input { flex:1; }
   .hidden { display:none !important; }
@@ -161,7 +162,8 @@
   <h1 id="reader-title"></h1>
   <p class="muted">좌측 여백: 한 화면 위로 · 우측 여백: 한 화면 아래로</p>
   <button id="reader-language" class="hidden">원문 미리보기</button>
-  <p class="message" id="reader-message"></p>
+  <p class="message" id="reader-message" role="status"></p>
+  <p class="muted hidden" id="translation-progress"></p>
   <div id="content"></div>
   <aside id="progress-notice" class="hidden" aria-label="최신 읽기 기록">
     <p id="progress-notice-text" role="status"></p>
@@ -650,6 +652,7 @@
       : previous===episodeId ? state.transitionFrom : '';
     state.writable=!state.saveCancelled && (!state.remote || (!state.remote.deleted && (!state.remote.episode_id || state.remote.episode_id===episodeId || !!state.transitionFrom)));
     show('reader'); $('content').replaceChildren(); note('reader-message','본문 불러오는 중…'); scrollTo(0,0);
+    $('translation-progress').classList.add('hidden');
     progressNotice();
     $('current-episode').textContent='회차 확인 중…'; $('current-episode').title='';
     $('manual-save').disabled=true; $('save-feedback').textContent='';
@@ -657,75 +660,99 @@
     $('reader-language').textContent=language==='zh'?'한국어로 읽기':'원문 미리보기';
     setNavVisible(true);
     history.replaceState({},'', '/app?work='+workId+'&ep='+episodeId+(language==='zh'?'&language=zh':''));
-    try {
-      const info=await api('episode/'+workId+'/'+episodeId+(workId.startsWith('69shuba-')?'?language='+language:''));
-      if(state.workId!==workId || state.episodeId!==episodeId || state.workRequest!==request) return;
-      const chapter=state.work.episodes.find(x=>x.episode_id===episodeId);
-      const episodeTitle=(language==='ko' && info.translation?.title) || chapter?.title || info.episode.title || '';
-      $('reader-title').textContent=episodeTitle;
-      const number=episodeTitle.match(/(?:^|\s|제|第)(\d+(?:\.\d+)?)\s*[화회장章]/);
-      $('current-episode').textContent=number ? '현재 '+number[1]+'화' : '현재 목록 '+info.episode.ordinal+'번째';
-      $('current-episode').title=episodeTitle;
-      updateEpisodeNavigation();
-      const content=$('content'); content.replaceChildren();
-      if(info.episode.state==='ready' && info.episode.paragraphs?.length) {
-        for(const paragraph of info.episode.paragraphs) content.append(node('p',paragraph));
-        if(language==='zh') {
-          state.writable=false;
-          note('reader-message','중국어 원문 미리보기입니다. 한국어 읽기 위치는 변경하지 않습니다.');
-          return;
-        }
-        note('reader-message',state.writable?'':state.saveCancelled ? '저장을 취소하여 자동 저장을 멈췄습니다. 다시 저장하려면 저장 버튼을 누르세요.' : state.remote?.deleted
-          ? '삭제된 기록입니다. 다시 저장하려면 저장 버튼을 누르세요.'
-          : '서버에는 다른 회차가 저장되어 있습니다. 이 회차는 로컬에서만 읽습니다.');
-        const ratio=!state.remote?.deleted && state.remote?.episode_id===episodeId ? Number(state.remote.position)||0 : Number(sessionStorage.getItem('readerPosition:'+workId+':'+episodeId))||0;
-        requestAnimationFrame(()=>{
-          if(state.workId!==workId || state.episodeId!==episodeId || state.workRequest!==request) return;
-          navScrollY=ratio*Math.max(0,document.documentElement.scrollHeight-innerHeight);
-          scrollTo(0,navScrollY);
-          state.reading=true;
-          $('manual-save').disabled=state.manualSaving;
-          if(state.transitionFrom || !state.remote?.episode_id) savePosition(false);
-        });
-      } else if(info.translation && language==='ko' && info.episode.state==='ready') {
-        const current=()=>state.workId===workId && state.episodeId===episodeId && state.workRequest===request;
-        let translation=info.translation;
-        if(translation.state==='missing') {
-          try {translation=(await api('episode/'+workId+'/'+episodeId+'/translate',{})).translation;}
-          catch(error){translation={state:'error',error:error.message};}
-          if(!current())return;
-        }
-        if(translation.state==='error') {
-          note('reader-message',translation.error || '번역하지 못했습니다. 직접 다시 시도하세요.');
-          const retry=node('button','번역 다시 시도');retry.id='retry-translation';
-          retry.onclick=async()=>{
-            retry.disabled=true;
-            try {await api('episode/'+workId+'/'+episodeId+'/translate',{retry:true});if(current())await openEpisode(episodeId);}
-            catch(error){if(current()){note('reader-message',error.message);retry.disabled=false;}}
-          };
-          content.append(retry);
-          const account=node('button','ChatGPT 연결 확인');account.onclick=accountScreen;content.append(account);
+    const current=()=>state.workId===workId && state.episodeId===episodeId && state.workRequest===request && !$('reader').classList.contains('hidden');
+    let pending=false;
+    async function refresh() {
+      if(!current())return;
+      try {
+        const info=await api('episode/'+workId+'/'+episodeId+(workId.startsWith('69shuba-')?'?language='+language:''));
+        if(!current())return;
+        pending=false;
+        const chapter=state.work.episodes.find(x=>x.episode_id===episodeId);
+        const episodeTitle=(language==='ko' && info.translation?.title) || chapter?.title || info.episode.title || '';
+        $('reader-title').textContent=episodeTitle;
+        const number=episodeTitle.match(/(?:^|\s|제|第)(\d+(?:\.\d+)?)\s*[화회장章]/);
+        $('current-episode').textContent=number ? '현재 '+number[1]+'화' : '현재 목록 '+info.episode.ordinal+'번째';
+        $('current-episode').title=episodeTitle;
+        updateEpisodeNavigation();
+        const content=$('content'); content.replaceChildren();
+        if(info.episode.state==='ready' && info.episode.paragraphs?.length) {
+          $('translation-progress').classList.add('hidden');
+          for(const paragraph of info.episode.paragraphs) content.append(node('p',paragraph));
+          if(language==='zh') {
+            state.writable=false;
+            note('reader-message','중국어 원문 미리보기입니다. 한국어 읽기 위치는 변경하지 않습니다.');
+            return;
+          }
+          note('reader-message',state.writable?(info.translation?.state==='ready'?'번역 완료 · 저장된 한국어 본문입니다.':''):state.saveCancelled ? '저장을 취소하여 자동 저장을 멈췄습니다. 다시 저장하려면 저장 버튼을 누르세요.' : state.remote?.deleted
+            ? '삭제된 기록입니다. 다시 저장하려면 저장 버튼을 누르세요.'
+            : '서버에는 다른 회차가 저장되어 있습니다. 이 회차는 로컬에서만 읽습니다.');
+          const ratio=!state.remote?.deleted && state.remote?.episode_id===episodeId ? Number(state.remote.position)||0 : Number(sessionStorage.getItem('readerPosition:'+workId+':'+episodeId))||0;
+          requestAnimationFrame(()=>{
+            if(state.workId!==workId || state.episodeId!==episodeId || state.workRequest!==request) return;
+            navScrollY=ratio*Math.max(0,document.documentElement.scrollHeight-innerHeight);
+            scrollTo(0,navScrollY);
+            state.reading=true;
+            $('manual-save').disabled=state.manualSaving;
+            if(state.transitionFrom || !state.remote?.episode_id) savePosition(false);
+          });
+        } else if(info.translation && language==='ko' && info.episode.state==='ready') {
+          let translation=info.translation;
+          if(translation.state==='missing') {
+            try {translation=(await api('episode/'+workId+'/'+episodeId+'/translate',{})).translation;}
+            catch(error){translation={state:'error',error:error.message};}
+            if(!current())return;
+          }
+          const completed=translation.completed || 0, total=translation.total || 0;
+          const seconds=Math.max(0,Math.floor((Date.now()-(translation.updated_at || Date.now()))/1000));
+          const elapsed=seconds>=60?Math.floor(seconds/60)+'분 '+seconds%60+'초':seconds+'초';
+          const batches=`전체 ${total}묶음 중 ${completed}묶음 완료`;
+          $('translation-progress').classList.remove('hidden');
+          if(translation.state==='error') {
+            note('reader-message','번역 실패 · '+(translation.error || '번역하지 못했습니다. 직접 다시 시도하세요.'));
+            note('translation-progress',(total?batches+'\n':'')+'자동 재시도하지 않습니다. 아래 버튼으로 다시 시도하거나 원문을 볼 수 있습니다.');
+            const retry=node('button','번역 다시 시도');retry.id='retry-translation';
+            retry.onclick=async()=>{
+              retry.disabled=true;
+              try {await api('episode/'+workId+'/'+episodeId+'/translate',{retry:true});if(current())await openEpisode(episodeId);}
+              catch(error){if(current()){note('reader-message',error.message);retry.disabled=false;}}
+            };
+            content.append(retry);
+            const account=node('button','ChatGPT 연결 확인');account.onclick=accountScreen;content.append(account);
+          } else {
+            const queued=translation.state==='queued';
+            const message=queued?'번역 대기 중 · 앞선 번역 작업이 끝나면 시작합니다.':'번역 중 · ChatGPT 응답을 기다리고 있습니다.';
+            if($('reader-message').textContent!==message)note('reader-message',message);
+            note('translation-progress',batches+' · 현재 단계 '+elapsed+' 경과\n'
+              +(queued?'순서대로 처리합니다.':completed<total?`${completed+1}번째 묶음 응답 대기 중입니다.`:'번역 결과 확인 중입니다.')
+              +' 전체 번역이 끝난 뒤 본문을 한 번에 표시합니다.\n묶음이 끝날 때 진행 상태가 갱신되며, 글자별 진행률은 아닙니다.');
+            pending=true;poll(refresh);
+          }
+        } else if(info.episode.state==='locked') {
+          note('reader-message',info.episode.error || '잠긴 회차입니다.');
+          const original=node('a','원본에서 확인'); original.href=info.episode.source_url; content.append(original);
+        } else if(info.verification) {
+          verification('reader-message',info.verification,()=>openEpisode(episodeId,language));
+          pending=true;poll(refresh);
+        } else if(info.paused || info.job?.state==='capacity') {
+          note('reader-message',info.paused?'수집이 일시정지되어 있습니다. 작품 관리에서 재개하세요.':info.job.error);
+          const manage=node('button','작품 관리');manage.onclick=manageScreen;content.append(manage);
+        } else if(info.episode.state==='error') {
+          note('reader-message',info.episode.error || '본문 수집에 실패했습니다.');
+          const retry=node('button','다시 시도'); retry.onclick=async()=>{await api('episode/'+workId+'/'+episodeId+'/retry',{});openEpisode(episodeId,language);}; content.append(retry);
+          const original=node('a','원본에서 확인'); original.href=info.episode.source_url; content.append(original);
         } else {
-          note('reader-message',(translation.state==='queued'?'번역 대기 중…':'번역 중…')+` ${translation.completed || 0}/${translation.total || 0} · 전체 번역이 끝나면 본문을 표시합니다.`);
-          poll(()=>openEpisode(episodeId,language));
+          note('reader-message',info.job?.error || '본문 수집 중…'); pending=true;poll(refresh);
         }
-      } else if(info.episode.state==='locked') {
-        note('reader-message',info.episode.error || '잠긴 회차입니다.');
-        const original=node('a','원본에서 확인'); original.href=info.episode.source_url; content.append(original);
-      } else if(info.verification) {
-        verification('reader-message',info.verification,()=>openEpisode(episodeId,language));
-        poll(()=>openEpisode(episodeId,language));
-      } else if(info.paused || info.job?.state==='capacity') {
-        note('reader-message',info.paused?'수집이 일시정지되어 있습니다. 작품 관리에서 재개하세요.':info.job.error);
-        const manage=node('button','작품 관리');manage.onclick=manageScreen;content.append(manage);
-      } else if(info.episode.state==='error') {
-        note('reader-message',info.episode.error || '본문 수집에 실패했습니다.');
-        const retry=node('button','다시 시도'); retry.onclick=async()=>{await api('episode/'+workId+'/'+episodeId+'/retry',{});openEpisode(episodeId,language);}; content.append(retry);
-        const original=node('a','원본에서 확인'); original.href=info.episode.source_url; content.append(original);
-      } else {
-        note('reader-message',info.job?.error || '본문 수집 중…'); poll(()=>openEpisode(episodeId,language));
+      } catch(e) {
+        if(!current())return;
+        const recheck=pending && (!e.status || e.status>=500);
+        const operation=workId.startsWith('69shuba-') && language==='ko'?'번역':'수집';
+        note('reader-message','상태 확인 실패 · '+e.message+(pending?` · ${operation} 실패로 확정된 것은 아닙니다. 서버 작업은 계속될 수 있습니다.`:'')+(recheck?' 잠시 후 상태를 다시 확인합니다.':''));
+        if(recheck)poll(refresh);
       }
-    } catch(e) {if(state.workRequest===request)note('reader-message',e.message);}
+    }
+    await refresh();
   }
   $('reader-language').onclick=()=>openEpisode(state.episodeId,state.language==='zh'?'ko':'zh');
   async function savePosition(manual, keepalive=false) {
