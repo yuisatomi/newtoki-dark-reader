@@ -126,7 +126,9 @@ def source_page(browser, url, work_id):
     context = (browser.contexts[0] if shared else browser.new_context(
         service_workers="block", **({"proxy": {"server": proxy}} if proxy else {})))
     host = urlparse(url).hostname
-    page = next((p for p in context.pages if urlparse(p.url).hostname == host), None) if shared else None
+    pages = [p for p in context.pages if urlparse(p.url).hostname == host] if shared else []
+    page = next((p for p in pages if urlparse(p.url).path.rstrip('/') == urlparse(url).path.rstrip('/')),
+                pages[0] if pages else None)
     borrowed_page = page is not None
     page = page or context.new_page()
     def restrict_request(route):
@@ -467,8 +469,14 @@ def extract_episode(browser, url, work_id, episode_id):
         };
       })();
         """)
-        response = page.goto(url, wait_until="domcontentloaded", timeout=30000)
-        check_browser_response(response, page)
+        loaded = False
+        try:
+            loaded = checked_url(page.url) == checked_url(url) and page.evaluate(BROWSER_CONTENT_READY)
+        except ValueError:
+            pass
+        if not loaded:
+            response = page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            check_browser_response(response, page)
         _, _, final_episode = checked_url(page.url, work_id)
         if final_episode != episode_id:
             raise CrawlUnavailable("요청한 회차가 다른 페이지로 이동했습니다.")

@@ -285,7 +285,9 @@ class TranslationTest(unittest.TestCase):
                 def source_page(*_): yield page
                 with patch.object(reader_crawl, 'source_page', source_page):
                     for automatic_check in (False, True):
+                        documents = []
                         def serve(route):
+                            if route.request.resource_type == 'document': documents.append(route.request.url)
                             if automatic_check and 'approved=1' not in route.request.url:
                                 route.fulfill(status=403, content_type='text/html; charset=utf-8',
                                     headers={'cf-mitigated': 'challenge'}, body='<title>Just a moment...</title>'
@@ -298,6 +300,9 @@ class TranslationTest(unittest.TestCase):
                         self.assertEqual((title, [item[0] for item in links]), ('作品', ['2', '1']))
                         paragraphs = reader_crawl.extract_episode(browser, 'https://www.69shuba.com/txt/999/1', '69shuba-999', '1')
                         self.assertEqual(paragraphs, ['原文段落。' * 20, '最后一段。'])
+                        before = len(documents)
+                        self.assertEqual(reader_crawl.extract_episode(browser, 'https://www.69shuba.com/txt/999/1', '69shuba-999', '1'), paragraphs)
+                        self.assertEqual(len(documents), before, 'A loaded chapter must not navigate back into verification')
                         page.unroute('**/*', serve)
                 context.close()
             finally:

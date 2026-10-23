@@ -354,6 +354,8 @@ def resume_completed_verifications(connect):
                                  (work_id, episode_id, token, host)).fetchone()
             if current:
                 resume_source(db, host)
+                # Save the loaded page before older prefetch jobs navigate its tab away.
+                db.execute("UPDATE reader_jobs SET updated_at=0 WHERE work_id=? AND episode_id=?", (work_id, episode_id))
 
 
 def handle_get(handler, connect, token):

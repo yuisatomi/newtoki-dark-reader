@@ -796,6 +796,24 @@ class ReaderAppTest(unittest.TestCase):
         unrelated.evaluate.assert_not_called()
         other_host.evaluate.assert_not_called()
 
+    def test_ready_verification_precedes_older_prefetch(self):
+        self.login()
+        self.request('/app/api/works', {'url': 'https://newtoki1.org/novel/999'})
+        with reader_sync.connect() as db:
+            db.execute('DELETE FROM reader_jobs')
+            for ordinal, episode in enumerate(('90', '91', '92'), 1):
+                db.execute("""INSERT INTO reader_episodes(work_id,episode_id,ordinal,title,source_url,updated_at)
+                    VALUES('999',?,?,?,?,1)""", (episode, ordinal, episode + '화', 'https://newtoki1.org/novel/999/' + episode))
+                reader_app.enqueue(db, '999', episode)
+            db.execute("UPDATE reader_jobs SET state='verification' WHERE episode_id='91'")
+            db.execute("UPDATE reader_jobs SET updated_at=1 WHERE episode_id!='91'")
+            db.execute("INSERT INTO reader_paused_sources VALUES('newtoki1.org','checking')")
+        with patch.object(reader_app, 'ready_verification_pages', return_value={('newtoki1.org', '999', '91')}):
+            reader_app.resume_completed_verifications(reader_sync.connect)
+        reader_app.browse_episode = Mock(return_value=['준비된 본문'])
+        self.assertTrue(reader_app.run_one_job(reader_sync.connect))
+        self.assertEqual(reader_app.browse_episode.call_args.args[2], '91')
+
     def test_verification_pauses_source_until_authenticated_resume(self):
         self.login()
         for work_id, host in (("11", "toki32.com"), ("12", "toki32.com"), ("13", "newtoki1.org")):
