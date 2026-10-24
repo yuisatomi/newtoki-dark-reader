@@ -68,6 +68,13 @@
     background:var(--surface); box-shadow:0 4px 18px #0005; display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
   #progress-notice-text { flex:1 1 220px; margin:0; font-size:.85rem; overflow-wrap:anywhere; }
   #resume-latest { min-height:44px; }
+  #site-verification { width:min(1100px,calc(100% - 24px)); max-height:calc(100dvh - 24px); padding:16px;
+    border:1px solid var(--border); border-radius:12px; background:var(--surface); color:var(--text); }
+  #site-verification::backdrop { background:#0009; }
+  #site-view { overflow:auto; max-height:60dvh; border:1px solid var(--border); background:white; }
+  #site-image { display:block; width:100%; min-width:900px; max-width:none; cursor:pointer; touch-action:pan-x pan-y pinch-zoom; }
+  #site-image:focus-visible { outline:3px solid var(--primary); outline-offset:-3px; }
+  #site-target { overflow-wrap:anywhere; }
   @media(max-width:600px) { #reader { padding:16px 17px 110px; } #reader-nav { gap:5px; } #reader-nav button { padding:9px 4px; font-size:.9rem; } }
 </style>
 </head>
@@ -200,12 +207,22 @@
   <button id="reader-account">계정·기기</button>
   <button id="reader-manage">작품 관리</button>
 </aside>
+<dialog id="site-verification" aria-labelledby="site-heading" aria-describedby="site-help">
+  <header><h2 id="site-heading">사이트 확인</h2><button id="site-close" autofocus>닫기</button></header>
+  <p id="site-target" class="muted"></p>
+  <p id="site-help" class="muted">아래 실제 화면의 체크박스를 직접 누르세요. 모바일은 화면 안에서 좌우·상하로 밀어 볼 수 있습니다.
+    키보드는 화면에 초점을 둔 뒤 Tab·Shift+Tab으로 항목 이동, Space·Enter로 누르기, Esc로 닫기입니다.</p>
+  <div id="site-view" class="hidden"><img id="site-image" tabindex="0" draggable="false" alt="원본 사이트의 실제 확인 화면" aria-describedby="site-help"></div>
+  <p id="site-message" class="message" role="status"></p>
+  <button id="site-reconnect">화면 다시 연결</button>
+</dialog>
 <script>
 (() => {
   const $ = id => document.getElementById(id);
   const state = { workId:'', episodeId:'', language:'ko', work:null, remote:null, writable:false, reading:false, manualSaving:false, saveCancelled:false, transitionFrom:'', poll:null, save:null, saving:Promise.resolve(), workRequest:0 };
   let navScrollY=0, navKeepUntil=0;
   let resourcesTimer=null, resourcesLoading=false, progressChecking=false;
+  let siteView=null;
   function setNavVisible(visible) {
     $('reader-nav').classList.toggle('collapsed',!visible);
     navScrollY=scrollY;
@@ -250,6 +267,7 @@
     return payload;
   }
   const show = name => {
+    if(name==='login' && siteView)$('site-verification').close();
     for(const id of ['login','home','reader','account','manage']) $(id).classList.toggle('hidden',id!==name);
     if(name!=='manage'){clearTimeout(resourcesTimer);resourcesTimer=null;}
   };
@@ -257,6 +275,70 @@
   const clearPoll = () => { if(state.poll) clearTimeout(state.poll); state.poll=null; };
   const poll = (fn) => { clearPoll(); state.poll=setTimeout(fn,2000); };
   const node = (tag,text) => { const el=document.createElement(tag); el.textContent=text; return el; };
+  async function siteAction(view, action, input={}) {
+    if(view!==siteView || view.busy)return;
+    clearTimeout(view.timer);view.busy=true;$('site-reconnect').disabled=true;
+    try {
+      const data=await api('work/'+view.workId+'/verification',{action,...(view.session?{session:view.session}:{}),...input});
+      if(view!==siteView) {
+        if(data.session)api('work/'+view.workId+'/verification',{action:'close',session:data.session}).catch(()=>{});
+        return;
+      }
+      view.session=data.session||'';
+      if(data.state==='waiting') {
+        const image=new Image();image.src='data:image/jpeg;base64,'+data.image;await image.decode();
+        if(view!==siteView)return;
+        $('site-image').src=image.src;$('site-view').classList.remove('hidden');
+        view.frame=data.frame;view.width=data.width;view.height=data.height;
+        note('site-target',data.host+' · '+(data.title||'확인 대기 페이지'));
+        note('site-message','확인 대기 중 · 화면에서 직접 조작하세요. 본문이 열리면 수집이 자동 재개됩니다.');
+        if(!document.hidden)view.timer=setTimeout(()=>siteAction(view,'frame'),1500);
+      } else {
+        view.frame='';$('site-view').classList.add('hidden');note('site-message',data.message||'확인 창을 닫았습니다.');
+      }
+    } catch(e) {
+      if(view!==siteView)return;
+      view.frame='';
+      if(e.status===410 || (action==='open' && !view.session))view.session='';
+      note('site-message',e.message+' 조작을 자동 반복하지 않았습니다. 화면 다시 연결을 누르세요.');
+    } finally {
+      view.busy=false;if(view===siteView)$('site-reconnect').disabled=false;
+    }
+  }
+  function openSiteVerification(workId) {
+    if(siteView)return;
+    const view={workId,session:'',frame:'',busy:false,timer:null};siteView=view;
+    $('site-view').classList.add('hidden');note('site-target','');note('site-message','실제 확인 화면에 연결 중…');
+    $('site-verification').showModal();siteAction(view,'open');
+  }
+  $('site-close').onclick=()=> $('site-verification').close();
+  $('site-verification').addEventListener('close',()=>{
+    const view=siteView;siteView=null;siteTap=null;if(!view)return;clearTimeout(view.timer);
+    if(view.session)api('work/'+view.workId+'/verification',{action:'close',session:view.session},true).catch(()=>{});
+  });
+  $('site-reconnect').onclick=()=>{if(siteView)siteAction(siteView,siteView.session?'frame':'open');};
+  let siteTap=null;
+  $('site-verification').addEventListener('pointerdown',e=>e.stopPropagation());
+  $('site-verification').addEventListener('pointerup',e=>e.stopPropagation());
+  $('site-verification').addEventListener('keydown',e=>e.stopPropagation());
+  $('site-image').addEventListener('pointerdown',e=>{siteTap=e.isPrimary && e.button===0?{id:e.pointerId,x:e.clientX,y:e.clientY,time:performance.now()}:null;});
+  $('site-image').addEventListener('pointercancel',()=>{siteTap=null;});
+  $('site-image').addEventListener('pointerup',e=>{
+    const tap=siteTap;siteTap=null;const view=siteView;
+    if(!tap || !view?.frame || view.busy || tap.id!==e.pointerId || Math.hypot(e.clientX-tap.x,e.clientY-tap.y)>8 || performance.now()-tap.time>1500)return;
+    const box=e.currentTarget.getBoundingClientRect();
+    siteAction(view,'click',{frame:view.frame,x:(e.clientX-box.left)*view.width/box.width,y:(e.clientY-box.top)*view.height/box.height});
+  });
+  $('site-image').addEventListener('keydown',e=>{
+    const key=e.key===' '? 'Space' : e.key==='Tab'&&e.shiftKey?'Shift+Tab':e.key;
+    if(!['Tab','Shift+Tab','Space','Enter'].includes(key))return;
+    e.preventDefault();if(siteView?.frame)siteAction(siteView,'key',{frame:siteView.frame,key});
+  });
+  document.addEventListener('visibilitychange',()=>{
+    if(!siteView)return;clearTimeout(siteView.timer);
+    if(!document.hidden && siteView.session)siteAction(siteView,'frame');
+  });
+  window.addEventListener('popstate',()=>{if(siteView)$('site-verification').close();});
   function bytes(value) {
     if(value===null || value===undefined || !Number.isFinite(value))return '확인 불가';
     let unit=0;const units=['B','KiB','MiB','GiB','TiB'];
@@ -353,6 +435,9 @@
         cachedRefresh.onclick=loadCached;cached.ontoggle=()=>{if(cached.open)loadCached();};
         cached.append(cachedSummary,cachedStatus,cachedRefresh,cachedList);card.append(cached);
         card.append(node('p',`수집 대기/진행 ${row.pending}개 · 오류 작업 ${row.errors}개 · 사람 확인 대기 ${row.verification}개`));
+        if(row.verification) {
+          const verify=node('button','사이트 확인');verify.onclick=()=>openSiteVerification(row.work_id);card.append(verify);
+        }
         card.append(node('p','본문 텍스트 약 '+(row.bytes/1024).toFixed(1)+' KB'+(row.host?' · '+row.host:'')));
         card.append(node('p',(row.paused?'수집 일시정지':'수집 허용')+` · 저장 한도 대기 ${row.capacity}개`));
         const sourceForm=node('form','');sourceForm.className='toolbar';
@@ -554,13 +639,14 @@
   function verification(id, message, resume) {
     note(id,message+' 정상 페이지가 열리면 자동으로 수집을 재개합니다.');
     const button=node('button','다시 확인 · 재개'), workId=state.workId;
+    const verify=node('button','사이트 확인');verify.className='primary';verify.onclick=()=>openSiteVerification(workId);
     button.onclick=async()=>{
       button.disabled=true;
       try {await api('work/'+workId+'/resume',{}); if(state.workId===workId) await resume();}
       catch(e) {note(id,e.message);}
       finally {button.disabled=false;}
     };
-    $(id).append(document.createElement('br'),button);
+    $(id).append(document.createElement('br'),verify,document.createTextNode(' '),button);
   }
   async function library() {
     clearPoll(); state.workRequest++; show('home'); $('library').classList.remove('hidden'); $('work').classList.add('hidden');

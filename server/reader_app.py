@@ -15,6 +15,7 @@ import reader_auth
 import reader_openai
 import reader_translate
 import reader_usage
+import reader_verification
 
 from reader_crawl import (CrawlUnavailable, HumanVerificationRequired, LockedChapter,
                           HOSTS, SHUBA_HOSTS, WORK_ID_PATTERN, checked_host, supported_host, checked_url,
@@ -27,6 +28,7 @@ WORK_PATH = re.compile(rf"^/app/api/work/({WORK_ID_PATTERN})$")
 SOURCE_PATH = re.compile(rf"^/app/api/work/({WORK_ID_PATTERN})/source$")
 REFRESH_PATH = re.compile(rf"^/app/api/work/({WORK_ID_PATTERN})/refresh$")
 RESUME_PATH = re.compile(rf"^/app/api/work/({WORK_ID_PATTERN})/resume$")
+VERIFICATION_PATH = re.compile(rf"^/app/api/work/({WORK_ID_PATTERN})/verification$")
 EPISODE_PATH = re.compile(rf"^/app/api/episode/({WORK_ID_PATTERN})/([0-9]{{1,128}})$")
 RETRY_PATH = re.compile(rf"^/app/api/episode/({WORK_ID_PATTERN})/([0-9]{{1,128}})/retry$")
 TRANSLATE_PATH = re.compile(rf"^/app/api/episode/({WORK_ID_PATTERN})/([0-9]{{1,128}})/translate$")
@@ -428,7 +430,7 @@ def handle_get(handler, connect, token):
         handler.send_header("Content-Type", "text/html; charset=utf-8")
         handler.send_header("Content-Length", str(len(body)))
         handler.send_header("Cache-Control", "no-store")
-        handler.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'")
+        handler.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'")
         handler.send_header("X-Content-Type-Options", "nosniff")
         handler.end_headers()
         handler.wfile.write(body)
@@ -606,6 +608,17 @@ def handle_post(handler, connect, token, store_progress, delete_progress):
     if managed is not None:
         status, payload, cookie = managed
         respond(handler, status, payload, cookie)
+        return
+    match = VERIFICATION_PATH.fullmatch(path)
+    if match:
+        try:
+            result = reader_verification.operate(connect, match.group(1), reader_auth.digest(reader_auth.session_value(handler)), data)
+            if result['state'] == 'ready':
+                resume_completed_verifications(connect)
+        except reader_verification.VerificationError as error:
+            respond(handler, error.status, {'error': str(error)})
+            return
+        respond(handler, 200, result)
         return
     if path == '/app/api/translation/disconnect':
         try:

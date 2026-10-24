@@ -1555,13 +1555,13 @@ class ReaderAppTest(unittest.TestCase):
                 with reader_sync.connect() as db:
                     db.execute("INSERT INTO reader_paused_sources VALUES('newtoki1.org','서버 브라우저에서 사람 확인이 필요합니다.')")
                 direct.goto(self.base + "/app?work=999")
-                expect(direct.locator("#work-message button")).to_have_text("다시 확인 · 재개")
+                expect(direct.locator("#work-message button")).to_have_text(["사이트 확인","다시 확인 · 재개"])
                 direct.locator("#episode-list button").first.click()
                 expect(direct.locator("#content p").first).to_have_text("첫 문단")
                 direct.locator("#next").click()
                 direct.locator("#next").click()
-                expect(direct.locator("#reader-message button")).to_have_text("다시 확인 · 재개")
-                direct.locator("#reader-message button").click()
+                expect(direct.locator("#reader-message button")).to_have_text(["사이트 확인","다시 확인 · 재개"])
+                direct.get_by_role('button',name='다시 확인 · 재개',exact=True).click()
                 expect(direct.locator("#reader-message")).to_have_text("수집 실패")
                 with reader_sync.connect() as db:
                     self.assertEqual(db.execute("SELECT count(*) FROM reader_paused_sources").fetchone()[0], 0)
