@@ -99,8 +99,15 @@ def init_db(connect):
         db.execute('CREATE TABLE IF NOT EXISTS reader_sources (host TEXT PRIMARY KEY)')
         db.execute("""CREATE TABLE IF NOT EXISTS reader_work_settings (
             work_id TEXT PRIMARY KEY, paused INTEGER NOT NULL DEFAULT 0,
-            prefetch INTEGER NOT NULL DEFAULT 2, cache_limit_mb INTEGER NOT NULL DEFAULT 0
+            prefetch INTEGER NOT NULL DEFAULT 2, cache_limit_mb INTEGER NOT NULL DEFAULT 0,
+            translation_prefetch INTEGER NOT NULL DEFAULT 1,
+            translation_anchor TEXT NOT NULL DEFAULT ''
         )""")
+        settings_columns = {row[1] for row in db.execute('PRAGMA table_info(reader_work_settings)')}
+        for column, declaration in (('translation_prefetch', 'INTEGER NOT NULL DEFAULT 1'),
+                                    ('translation_anchor', "TEXT NOT NULL DEFAULT ''")):
+            if column not in settings_columns:
+                db.execute(f'ALTER TABLE reader_work_settings ADD COLUMN {column} {declaration}')
         db.execute("""
             CREATE TABLE IF NOT EXISTS reader_works (
                 work_id TEXT PRIMARY KEY, host TEXT NOT NULL DEFAULT '',
@@ -197,6 +204,38 @@ def queue_prefetch(db, work_id, episode_id):
             enqueue(db, work_id, row["episode_id"])
 
 
+def queue_translation_prefetch(db):
+    """Caller holds a write transaction; only explicit reading moves the window."""
+    desired = set()
+    windows = db.execute("""SELECT s.work_id,s.translation_anchor,s.translation_prefetch
+        FROM reader_work_settings s JOIN reader_works w ON w.work_id=s.work_id
+        WHERE s.paused=0 AND s.translation_prefetch>0 AND s.translation_anchor!=''
+        AND EXISTS (SELECT 1 FROM reader_translations t
+            WHERE t.work_id=s.work_id AND t.episode_id=s.translation_anchor
+            AND t.model=? AND t.language=? AND t.prompt_version=? AND t.state IN ('queued','running','ready'))""",
+                         (reader_translate.MODEL, reader_translate.LANGUAGE, reader_translate.PROMPT_VERSION)).fetchall()
+    for window in windows:
+        work_id = window['work_id']
+        if not shuba_work(work_id):
+            continue
+        episodes = db.execute("""SELECT * FROM reader_episodes WHERE work_id=? AND ordinal>(
+            SELECT ordinal FROM reader_episodes WHERE work_id=? AND episode_id=?)
+            ORDER BY ordinal LIMIT ?""", (work_id, work_id, window['translation_anchor'], window['translation_prefetch'])).fetchall()
+        for episode in episodes:
+            desired.add((work_id, episode['episode_id']))
+            if episode['state'] == 'missing':
+                enqueue(db, work_id, episode['episode_id'])
+            elif episode['state'] == 'ready' and episode['paragraphs_json']:
+                # Existing failures are not automatically retried; cached results remain reusable.
+                if not db.execute('SELECT 1 FROM reader_translations WHERE ' + reader_translate.KEY,
+                                  reader_translate.episode_key(episode)).fetchone():
+                    reader_translate.enqueue(db, episode, prefetch=True)
+    for job in db.execute("SELECT work_id,episode_id FROM reader_translations WHERE prefetch=1 AND state IN ('queued','running')").fetchall():
+        if (job['work_id'], job['episode_id']) not in desired:
+            db.execute("DELETE FROM reader_translations WHERE work_id=? AND episode_id=? AND prefetch=1 AND state IN ('queued','running')",
+                       (job['work_id'], job['episode_id']))
+
+
 def set_work_source(db, work_id, host):
     """Caller holds a write transaction; discard results from the previous source."""
     work_url(host, work_id)
@@ -227,15 +266,15 @@ def source_hosts(db, work_id=None):
 
 
 def work_settings(db, work_id):
-    row = db.execute('SELECT paused,prefetch,cache_limit_mb FROM reader_work_settings WHERE work_id=?', (work_id,)).fetchone()
-    return dict(row) if row else {'paused': 0, 'prefetch': 2, 'cache_limit_mb': 0}
+    row = db.execute('SELECT paused,prefetch,cache_limit_mb,translation_prefetch FROM reader_work_settings WHERE work_id=?', (work_id,)).fetchone()
+    return dict(row) if row else {'paused': 0, 'prefetch': 2, 'cache_limit_mb': 0, 'translation_prefetch': 1}
 
 
 def checked_settings(data):
     if not isinstance(data, dict):
         raise ValueError('수집 설정이 올바르지 않습니다.')
     values = {}
-    for key, default, maximum in (('paused', 0, 1), ('prefetch', 2, 200), ('cache_limit_mb', 0, 1024)):
+    for key, default, maximum in (('paused', 0, 1), ('prefetch', 2, 200), ('cache_limit_mb', 0, 1024), ('translation_prefetch', 1, 200)):
         value = data.get(key, default)
         if type(value) is not int or not 0 <= value <= maximum:
             raise ValueError('수집 설정 범위를 확인하세요.')
@@ -244,9 +283,11 @@ def checked_settings(data):
 
 
 def save_settings(db, work_id, settings):
-    db.execute('''INSERT INTO reader_work_settings(work_id,paused,prefetch,cache_limit_mb) VALUES(?,?,?,?)
-        ON CONFLICT(work_id) DO UPDATE SET paused=excluded.paused,prefetch=excluded.prefetch,cache_limit_mb=excluded.cache_limit_mb''',
-               (work_id, settings['paused'], settings['prefetch'], settings['cache_limit_mb']))
+    db.execute('''INSERT INTO reader_work_settings(work_id,paused,prefetch,cache_limit_mb,translation_prefetch) VALUES(?,?,?,?,?)
+        ON CONFLICT(work_id) DO UPDATE SET paused=excluded.paused,prefetch=excluded.prefetch,
+        cache_limit_mb=excluded.cache_limit_mb,translation_prefetch=excluded.translation_prefetch''',
+               (work_id, settings['paused'], settings['prefetch'], settings['cache_limit_mb'],
+                settings.get('translation_prefetch', work_settings(db, work_id)['translation_prefetch'])))
 
 
 def cache_bytes(db, work_id):
@@ -439,6 +480,7 @@ def handle_get(handler, connect, token):
                 COALESCE(j.pending,0) AS pending,COALESCE(j.verification,0) AS verification,
                 COALESCE(j.errors,0) AS errors,COALESCE(j.capacity,0) AS capacity,
                 COALESCE(s.paused,0) AS paused,COALESCE(s.prefetch,2) AS prefetch,
+                COALESCE(s.translation_prefetch,1) AS translation_prefetch,
                 COALESCE(s.cache_limit_mb,0) AS cache_limit_mb
                 FROM works k LEFT JOIN reader_works w ON w.work_id=k.work_id
                 LEFT JOIN progress p ON p.kind='novel' AND p.work_id=k.work_id AND p.deleted=0
@@ -563,6 +605,7 @@ def handle_post(handler, connect, token, store_progress, delete_progress):
             return
         with connect() as db:
             db.execute("UPDATE reader_translations SET state='error',error='ChatGPT 연결이 해제되었습니다.',code='auth',run_token='' WHERE state IN ('queued','running')")
+            db.execute("UPDATE reader_work_settings SET translation_anchor=''")
         respond(handler, 200, {'ok': True, 'message': message})
         return
     match = TRANSLATE_PATH.fullmatch(path)
@@ -582,6 +625,9 @@ def handle_post(handler, connect, token, store_progress, delete_progress):
             except ValueError as error:
                 respond(handler, 409, {'error': str(error)})
                 return
+            db.execute('''INSERT INTO reader_work_settings(work_id,translation_anchor) VALUES(?,?)
+                ON CONFLICT(work_id) DO UPDATE SET translation_anchor=excluded.translation_anchor''', (work_id, episode_id))
+            queue_translation_prefetch(db)
             result.pop('paragraphs', None)
             respond(handler, 200, {'translation': result})
         return
@@ -614,6 +660,7 @@ def handle_post(handler, connect, token, store_progress, delete_progress):
                        (work_id, work['host'], work['title'], now))
             backup['settings']['paused'] = 1  # Review restored data before starting new collection.
             save_settings(db, work_id, backup['settings'])
+            db.execute("UPDATE reader_work_settings SET translation_anchor='' WHERE work_id=?", (work_id,))
             for episode in backup['episodes']:
                 paragraphs = episode['paragraphs']
                 db.execute('''INSERT INTO reader_episodes(work_id,episode_id,ordinal,title,source_url,paragraphs_json,state,updated_at)
@@ -650,7 +697,10 @@ def handle_post(handler, connect, token, store_progress, delete_progress):
                 respond(handler, 404, {'error': '출처와 회차 목록을 먼저 등록하세요.'})
                 return
             if settings is not None:
+                if 'translation_prefetch' not in data['settings']:
+                    settings['translation_prefetch'] = work_settings(db, work_id)['translation_prefetch']
                 save_settings(db, work_id, settings)
+                queue_translation_prefetch(db)
                 db.execute("UPDATE reader_jobs SET state='queued',attempts=0,error='',updated_at=? WHERE work_id=? AND state='capacity'",
                            (int(time.time() * 1000), work_id))
             elif path.endswith('/cache-clear'):
@@ -661,6 +711,7 @@ def handle_post(handler, connect, token, store_progress, delete_progress):
                 settings = work_settings(db, work_id)
                 settings['paused'] = 1
                 save_settings(db, work_id, settings)
+                db.execute("UPDATE reader_work_settings SET translation_anchor='' WHERE work_id=?", (work_id,))
             else:
                 rows = db.execute("""SELECT episode_id FROM reader_jobs WHERE work_id=? AND state='error'
                     UNION SELECT episode_id FROM reader_episodes WHERE work_id=? AND state='error'""", (work_id, work_id)).fetchall()

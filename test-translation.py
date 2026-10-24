@@ -37,9 +37,11 @@ class TranslationTest(unittest.TestCase):
         self.environment.stop()
         support.ReaderAppTest.tearDown(self)
 
-    def source(self, paragraphs=None):
+    def source(self, paragraphs=None, translation_prefetch=0):
         self.request('/app/api/works', {'url': 'https://www.69shuba.com/book/999.htm'})
         with reader_sync.connect() as db:
+            support.reader_app.save_settings(db, '69shuba-999', {'paused': 0, 'prefetch': 2, 'cache_limit_mb': 0,
+                                                               'translation_prefetch': translation_prefetch})
             db.execute("UPDATE reader_works SET title='中国小说' WHERE work_id='69shuba-999'")
             for index in range(1, 4):
                 db.execute('''INSERT INTO reader_episodes
@@ -61,6 +63,7 @@ class TranslationTest(unittest.TestCase):
     def fake_response(payload):
         assert payload['model'] == 'gpt-6-luna'
         assert payload['reasoning']['effort'] == 'none'
+        assert payload.get('service_tier') == 'default'
         assert payload['store'] is False and payload['stream'] is True
         items = json.loads(payload['input'][0]['content'])['items']
         return json.dumps({'items': [{'id': item['id'], 'text': '한국어 번역 ' + item['id']} for item in items]})
@@ -216,6 +219,150 @@ class TranslationTest(unittest.TestCase):
         with reader_sync.connect() as db:
             self.assertEqual(db.execute('SELECT count(*) FROM reader_translations').fetchone()[0], 0)
         self.assertFalse(reader_translate.run_one(reader_sync.connect))
+
+    def test_translation_prefetch_default_migration_preserves_existing_rows(self):
+        base = self.source()
+        self.request(base + '/translate', {})
+        with patch.object(reader_openai, 'response_text', side_effect=self.fake_response):
+            reader_translate.run_one(reader_sync.connect)
+        with reader_sync.connect() as db:
+            db.execute('ALTER TABLE reader_work_settings DROP COLUMN translation_prefetch')
+            db.execute('ALTER TABLE reader_work_settings DROP COLUMN translation_anchor')
+            db.execute('ALTER TABLE reader_translations DROP COLUMN prefetch')
+            columns = {table: [row[1] for row in db.execute('PRAGMA table_info('+table+')')]
+                       for table in ('progress', 'reader_episodes', 'reader_translations', 'reader_work_settings')}
+            before = {table: [tuple(row) for row in db.execute('SELECT '+','.join(names)+' FROM '+table+' ORDER BY rowid')]
+                      for table, names in columns.items()}
+        reader_sync.init_db()
+        reader_sync.init_db()
+        with reader_sync.connect() as db:
+            for table, names in columns.items():
+                self.assertEqual([tuple(row) for row in db.execute('SELECT '+','.join(names)+' FROM '+table+' ORDER BY rowid')], before[table])
+            self.assertEqual(tuple(db.execute('SELECT translation_prefetch,translation_anchor FROM reader_work_settings').fetchone()), (1, ''))
+            self.assertEqual(db.execute('SELECT prefetch FROM reader_translations').fetchone()[0], 0)
+        self.assertEqual(self.request(base)[1]['translation']['state'], 'ready')
+        self.assertEqual(self.request('/app/api/manage')[1]['works'][0]['translation_prefetch'], 1)
+
+    def test_translation_prefetch_is_bounded_independent_and_not_recursive(self):
+        base = self.source(translation_prefetch=1)
+        self.request('/app/api/manage/settings', {'work_id':'69shuba-999', 'settings':{'prefetch':0, 'translation_prefetch':1}})
+        self.request(base)
+        with reader_sync.connect() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM reader_translations').fetchone()[0], 0)
+        self.request(base + '/translate', {})
+        with reader_sync.connect() as db:
+            self.assertEqual([tuple(row) for row in db.execute('SELECT episode_id,prefetch FROM reader_translations ORDER BY episode_id')], [('1',0),('2',1)])
+        with patch.object(reader_openai, 'response_text', side_effect=self.fake_response) as call:
+            for _ in range(2):
+                self.assertTrue(reader_translate.run_one(reader_sync.connect, support.reader_app.queue_translation_prefetch))
+            for _ in range(3):
+                self.assertFalse(reader_translate.run_one(reader_sync.connect, support.reader_app.queue_translation_prefetch))
+            self.assertEqual(call.call_count, 2)
+            # Reading an already translated chapter advances the window without retranslating it.
+            self.request('/app/api/episode/69shuba-999/2/translate', {})
+            self.assertTrue(reader_translate.run_one(reader_sync.connect, support.reader_app.queue_translation_prefetch))
+            self.assertFalse(reader_translate.run_one(reader_sync.connect, support.reader_app.queue_translation_prefetch))
+            self.assertEqual(call.call_count, 3)
+        with reader_sync.connect() as db:
+            self.assertEqual(db.execute("SELECT translation_anchor FROM reader_work_settings WHERE work_id='69shuba-999'").fetchone()[0], '2')
+            self.assertEqual(db.execute("SELECT count(*) FROM progress WHERE work_id='69shuba-999'").fetchone()[0], 0)
+
+    def test_translation_prefetch_collects_missing_originals_with_source_prefetch_zero(self):
+        base = self.source(translation_prefetch=2)
+        with reader_sync.connect() as db:
+            db.execute("UPDATE reader_work_settings SET prefetch=0 WHERE work_id='69shuba-999'")
+            db.execute("UPDATE reader_episodes SET state='missing',paragraphs_json=NULL WHERE work_id='69shuba-999' AND episode_id!='1'")
+            db.execute("DELETE FROM reader_jobs WHERE work_id='69shuba-999'")
+        self.request(base + '/translate', {})
+        with reader_sync.connect() as db:
+            self.assertEqual([row[0] for row in db.execute('SELECT episode_id FROM reader_jobs ORDER BY episode_id')], ['2','3'])
+            self.assertEqual(db.execute('SELECT count(*) FROM reader_translations').fetchone()[0], 1)
+        with patch.object(reader_openai, 'response_text', side_effect=self.fake_response), patch.object(support.reader_app, 'browse_episode', return_value=['收集的原文。']):
+            self.assertTrue(reader_translate.run_one(reader_sync.connect, support.reader_app.queue_translation_prefetch))
+            for episode in ('2','3'):
+                self.assertTrue(support.reader_app.run_one_job(reader_sync.connect))
+                self.assertTrue(reader_translate.run_one(reader_sync.connect, support.reader_app.queue_translation_prefetch))
+                self.assertEqual(self.request('/app/api/episode/69shuba-999/'+episode)[1]['translation']['state'], 'ready')
+            self.assertFalse(reader_translate.run_one(reader_sync.connect, support.reader_app.queue_translation_prefetch))
+
+    def test_translation_prefetch_settings_validation_and_old_client_preserves_value(self):
+        self.source(translation_prefetch=7)
+        endpoint = '/app/api/manage/settings'
+        for value in (-1, 201, True, 1.5, '2', None):
+            self.assertEqual(self.request(endpoint, {'work_id':'69shuba-999','settings':{'translation_prefetch':value}})[0], 400)
+        self.assertEqual(self.request(endpoint, {'work_id':'69shuba-999','settings':{'prefetch':0}})[0], 200)
+        work = self.request('/app/api/manage')[1]['works'][0]
+        self.assertEqual((work['prefetch'],work['translation_prefetch']), (0,7))
+        backup = self.request('/app/api/manage/backup?work_id=69shuba-999')[1]
+        self.assertEqual(backup['settings']['translation_prefetch'], 7)
+        self.assertNotIn('translation_anchor', backup['settings'])
+        del backup['settings']['translation_prefetch']
+        self.assertEqual(self.request('/app/api/manage/restore', {'backup':backup,'confirm':True})[0], 200)
+        restored = self.request('/app/api/manage/backup?work_id=69shuba-999')[1]
+        self.assertEqual(restored['settings']['translation_prefetch'], 1)
+
+    def test_translation_prefetch_shrink_pause_and_disable_discard_late_result(self):
+        base = self.source(translation_prefetch=2)
+        self.request(base + '/translate', {})
+        with patch.object(reader_openai, 'response_text', side_effect=self.fake_response):
+            reader_translate.run_one(reader_sync.connect)
+        endpoint = '/app/api/manage/settings'
+        self.request(endpoint, {'work_id':'69shuba-999','settings':{'translation_prefetch':1}})
+        with reader_sync.connect() as db:
+            self.assertEqual([row[0] for row in db.execute("SELECT episode_id FROM reader_translations WHERE state='queued'")], ['2'])
+        self.request(endpoint, {'work_id':'69shuba-999','settings':{'paused':1}})
+        with reader_sync.connect() as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM reader_translations WHERE state='queued'").fetchone()[0], 0)
+        self.request(endpoint, {'work_id':'69shuba-999','settings':{'paused':0}})
+        def disable(payload):
+            self.request(endpoint, {'work_id':'69shuba-999','settings':{'translation_prefetch':0}})
+            return self.fake_response(payload)
+        with patch.object(reader_openai, 'response_text', side_effect=disable) as call:
+            self.assertTrue(reader_translate.run_one(reader_sync.connect, support.reader_app.queue_translation_prefetch))
+            self.assertFalse(reader_translate.run_one(reader_sync.connect, support.reader_app.queue_translation_prefetch))
+            self.assertEqual(call.call_count, 1)
+        self.assertEqual(self.request(base)[1]['translation']['state'], 'ready')
+        self.assertEqual(self.request('/app/api/episode/69shuba-999/2')[1]['translation']['state'], 'missing')
+
+    def test_translation_prefetch_foreground_priority_and_failure_is_not_retried(self):
+        base = self.source(translation_prefetch=2)
+        self.request(base + '/translate', {})
+        # A foreground chapter is selected ahead of older speculative work.
+        with reader_sync.connect() as db:
+            db.execute("UPDATE reader_translations SET updated_at=0 WHERE prefetch=1")
+        with patch.object(reader_openai, 'response_text', side_effect=self.fake_response):
+            reader_translate.run_one(reader_sync.connect, support.reader_app.queue_translation_prefetch)
+        self.assertEqual(self.request(base)[1]['translation']['state'], 'ready')
+        self.request('/app/api/manage/settings', {'work_id':'69shuba-999','settings':{'translation_prefetch':1}})
+        with patch.object(reader_openai, 'response_text', side_effect=reader_openai.OpenAIError('quota','使用限制')) as call:
+            self.assertTrue(reader_translate.run_one(reader_sync.connect, support.reader_app.queue_translation_prefetch))
+            for _ in range(3):
+                self.request(base + '/translate', {})
+                self.assertFalse(reader_translate.run_one(reader_sync.connect, support.reader_app.queue_translation_prefetch))
+            self.assertEqual(call.call_count, 1)
+        self.assertEqual(self.request('/app/api/episode/69shuba-999/2')[1]['translation']['code'], 'quota')
+        self.request('/app/api/episode/69shuba-999/2/translate', {'retry':True})
+        with patch.object(reader_openai, 'response_text', side_effect=self.fake_response):
+            reader_translate.run_one(reader_sync.connect, support.reader_app.queue_translation_prefetch)
+        self.assertEqual(self.request('/app/api/episode/69shuba-999/2')[1]['translation']['state'], 'ready')
+
+    def test_translation_prefetch_clear_restore_and_delete_do_not_restart_window(self):
+        base = self.source(translation_prefetch=1)
+        self.request(base + '/translate', {})
+        with patch.object(reader_openai, 'response_text', side_effect=self.fake_response):
+            reader_translate.run_one(reader_sync.connect)
+        backup = self.request('/app/api/manage/backup?work_id=69shuba-999')[1]
+        for path, body in (('cache-clear',{'work_id':'69shuba-999','confirm':True}),('restore',{'backup':backup,'confirm':True})):
+            self.assertEqual(self.request('/app/api/manage/'+path,body)[0], 200)
+            self.request('/app/api/manage/settings', {'work_id':'69shuba-999','settings':{'paused':0}})
+            with patch.object(reader_openai, 'response_text') as call:
+                self.assertFalse(reader_translate.run_one(reader_sync.connect, support.reader_app.queue_translation_prefetch))
+                call.assert_not_called()
+            with reader_sync.connect() as db:
+                self.assertEqual(db.execute("SELECT translation_anchor FROM reader_work_settings WHERE work_id='69shuba-999'").fetchone()[0], '')
+        self.request(base + '/translate', {})
+        self.assertEqual(self.request('/app/api/manage/delete', {'work_id':'69shuba-999','confirm':True})[0], 200)
+        self.assertFalse(reader_translate.run_one(reader_sync.connect, support.reader_app.queue_translation_prefetch))
 
     def test_deduplicated_translation_and_cache(self):
         base = self.source()
@@ -434,12 +581,78 @@ class TranslationTest(unittest.TestCase):
     def test_capacity_stops_translation_before_external_request(self):
         base = self.source(['中' * 120000])
         with reader_sync.connect() as db:
-            db.execute("INSERT INTO reader_work_settings VALUES('69shuba-999',0,2,1)")
+            db.execute("UPDATE reader_work_settings SET cache_limit_mb=1 WHERE work_id='69shuba-999'")
         self.request(base + '/translate', {})
         with patch.object(reader_openai, 'response_text') as request:
             reader_translate.run_one(reader_sync.connect)
             request.assert_not_called()
         self.assertEqual(self.request(base)[1]['translation']['code'], 'capacity')
+
+    def test_browser_translation_prefetch_settings_and_cached_read(self):
+        from playwright.sync_api import expect, sync_playwright
+        executable = os.environ.get('READER_TEST_BROWSER', r'C:\Program Files\Google\Chrome\Application\chrome.exe')
+        if not Path(executable).exists(): self.skipTest('Local Chromium is unavailable')
+        base = self.source(translation_prefetch=1)
+        self.request(base + '/translate', {})
+        with patch.object(reader_openai, 'response_text', side_effect=self.fake_response):
+            reader_translate.run_one(reader_sync.connect)
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True, executable_path=executable)
+            try:
+                for viewport in ({'width':390,'height':844}, {'width':1280,'height':900}):
+                    with reader_sync.connect() as db:
+                        db.execute("DELETE FROM reader_translations WHERE prefetch=1")
+                        db.execute("UPDATE reader_work_settings SET translation_anchor='',translation_prefetch=1 WHERE work_id='69shuba-999'")
+                    context = browser.new_context(viewport=viewport)
+                    context.add_cookies([{'name':self.cookie.split('=',1)[0], 'value':self.cookie.split('=',1)[1], 'url':self.base}])
+                    page = context.new_page()
+                    posts = []
+                    page.on('request',lambda request: posts.append(request.url) if request.method=='POST' and request.url.endswith('/translate') else None)
+                    page.goto(self.base+'/app/manage')
+                    card = page.locator('#manage-list [data-work-id="69shuba-999"]')
+                    expect(card.get_by_label('미리 번역할 다음 회차 수')).to_have_value('1')
+                    self.assertLessEqual(page.evaluate('document.documentElement.scrollWidth'), viewport['width'])
+                    expect(page.locator('#manage-list [data-work-id="999"]').get_by_label('미리 번역할 다음 회차 수')).to_have_count(0)
+                    card.get_by_label('미리 수집할 다음 회차 수').fill('0')
+                    card.get_by_label('미리 번역할 다음 회차 수').fill('2')
+                    card.get_by_role('button',name='수집·번역 설정 저장',exact=True).click()
+                    expect(page.locator('#manage-message')).to_have_text('수집·번역 설정을 저장했습니다.')
+                    expect(card.get_by_label('미리 번역할 다음 회차 수')).to_have_value('2')
+                    card.get_by_label('미리 번역할 다음 회차 수').fill('1')
+                    card.get_by_role('button',name='수집·번역 설정 저장',exact=True).click()
+                    expect(card.get_by_label('미리 번역할 다음 회차 수')).to_have_value('1')
+                    with reader_sync.connect() as db:
+                        self.assertEqual(tuple(db.execute("SELECT prefetch,translation_prefetch FROM reader_work_settings WHERE work_id='69shuba-999'").fetchone()), (0,1))
+                        self.assertEqual(db.execute("SELECT count(*) FROM reader_translations WHERE prefetch=1").fetchone()[0], 0)
+                    page.goto(self.base+'/app?work=69shuba-999&ep=1')
+                    expect(page.locator('#content p')).to_have_count(2)
+                    expect(page.locator('#manual-save')).to_be_enabled()
+                    page.wait_for_timeout(300)
+                    self.assertEqual(len(posts),1,'Cached reading must signal its window only once')
+                    with reader_sync.connect() as db:
+                        self.assertEqual([row[0] for row in db.execute('SELECT episode_id FROM reader_translations WHERE prefetch=1')], ['2'])
+                    page.locator('#reader-language').click()
+                    expect(page.locator('#reader-message')).to_contain_text('원문 미리보기')
+                    page.wait_for_timeout(2200)
+                    self.assertEqual(len(posts),1,'Original preview must not request translation')
+                    page.goto(self.base+'/app/manage')
+                    card.get_by_label('미리 번역할 다음 회차 수').fill('0')
+                    card.get_by_role('button',name='수집·번역 설정 저장',exact=True).click()
+                    expect(card.get_by_label('미리 번역할 다음 회차 수')).to_have_value('0')
+                    with reader_sync.connect() as db:
+                        self.assertEqual(db.execute('SELECT count(*) FROM reader_translations WHERE prefetch=1').fetchone()[0], 0)
+                    # A slow or failed scheduling request must not delay cached reading.
+                    held = []
+                    page.route('**/app/api/episode/69shuba-999/1/translate',lambda route: held.append(route))
+                    page.goto(self.base+'/app?work=69shuba-999&ep=1')
+                    expect(page.locator('#content p')).to_have_count(2)
+                    expect(page.locator('#manual-save')).to_be_enabled()
+                    self.assertEqual(len(held),1)
+                    held[0].fulfill(status=503,json={'error':'temporary unavailable'})
+                    expect(page.locator('#reader-message')).to_contain_text('미리 번역 요청 실패')
+                    context.close()
+            finally:
+                browser.close()
 
     def test_browser_shuba_source_and_reader(self):
         from playwright.sync_api import expect, sync_playwright

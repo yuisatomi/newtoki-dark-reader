@@ -671,7 +671,7 @@ class ReaderAppTest(unittest.TestCase):
                 (work_id,episode_id,ordinal,title,source_url,updated_at) VALUES('9000',?,?,?,?,1)""",
                 [(str(n),n,f'{n}화',f'https://newtoki1.org/novel/9000/{n}') for n in range(1,251)])
             self.assertEqual(reader_app.work_settings(db,'9000')['prefetch'],2)
-        settings={'paused':0,'prefetch':200,'cache_limit_mb':0}
+        settings={'paused':0,'prefetch':200,'cache_limit_mb':0,'translation_prefetch':1}
         self.assertEqual(self.request('/app/api/manage/settings',{'work_id':'9000','settings':settings})[0],200)
         reader_sync.init_db()
         backup=self.request('/app/api/manage/backup?work_id=9000')[1]

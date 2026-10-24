@@ -323,5 +323,5 @@ if __name__ == "__main__":
         if not SYNC_TOKEN and not reader_auth.account(connect):
             raise SystemExit('Configure an owner with --set-password or provide SYNC_TOKEN for migration')
         reader_app.start_worker(connect)
-        reader_translate.start_worker(connect)
+        reader_translate.start_worker(connect, reader_app.queue_translation_prefetch)
         ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
