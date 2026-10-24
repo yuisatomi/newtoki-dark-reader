@@ -101,11 +101,12 @@ def init_db(connect):
             work_id TEXT PRIMARY KEY, paused INTEGER NOT NULL DEFAULT 0,
             prefetch INTEGER NOT NULL DEFAULT 2, cache_limit_mb INTEGER NOT NULL DEFAULT 0,
             translation_prefetch INTEGER NOT NULL DEFAULT 1,
-            translation_anchor TEXT NOT NULL DEFAULT ''
+            translation_anchor TEXT NOT NULL DEFAULT '', glossary_json TEXT NOT NULL DEFAULT '{}'
         )""")
         settings_columns = {row[1] for row in db.execute('PRAGMA table_info(reader_work_settings)')}
         for column, declaration in (('translation_prefetch', 'INTEGER NOT NULL DEFAULT 1'),
-                                    ('translation_anchor', "TEXT NOT NULL DEFAULT ''")):
+                                    ('translation_anchor', "TEXT NOT NULL DEFAULT ''"),
+                                    ('glossary_json', "TEXT NOT NULL DEFAULT '{}'")):
             if column not in settings_columns:
                 db.execute(f'ALTER TABLE reader_work_settings ADD COLUMN {column} {declaration}')
         db.execute("""
@@ -312,7 +313,8 @@ def export_work(db, work_id):
               'work': dict(work) if work else {'work_id': work_id, 'host': '', 'title': progress['title']},
               'settings': work_settings(db, work_id), 'progress': dict(progress) if progress else None, 'episodes': episodes}
     if shuba_work(work_id):
-        result.update(version=2, translations=reader_translate.export_ready(db, work_id))
+        result.update(version=2, translations=reader_translate.export_ready(db, work_id),
+                      glossary=reader_translate.glossary(db, work_id))
     if len(json.dumps({'backup': result, 'confirm': True}, ensure_ascii=False).encode()) > BACKUP_LIMIT - 1024:
         raise ValueError('앱 백업은 작품당 32 MB까지 지원합니다. 큰 작품은 서버 DB 백업을 이용하세요.')
     return result
@@ -371,6 +373,7 @@ def checked_backup(data):
             raise ValueError('읽기 위치가 올바르지 않습니다.')
         result['progress'] = dict(episode_id=eid, position=position, title=title(progress.get('title')))
     result['translations'] = reader_translate.checked_backup(data.get('translations', []), result['episodes']) if data['version'] == 2 else []
+    result['glossary'] = reader_translate.checked_glossary(data.get('glossary', {})) if data['version'] == 2 else {}
     return result
 
 
@@ -494,6 +497,8 @@ def handle_get(handler, connect, token):
                 item['translated'] = db.execute("SELECT count(DISTINCT episode_id) FROM reader_translations WHERE work_id=? AND state='ready'", (item['work_id'],)).fetchone()[0]
                 item['translation_bytes'] = reader_translate.stored_bytes(db, item['work_id'])
                 item['bytes'] += item['translation_bytes']
+                if shuba_work(item['work_id']):
+                    item['glossary'] = reader_translate.glossary(db, item['work_id'])
             respond(handler, 200, {'works': works, 'sources': source_hosts(db)})
             return
         if path == '/app/api/devices':
@@ -578,7 +583,8 @@ def handle_post(handler, connect, token, store_progress, delete_progress):
             respond(handler, 401, {'error': '로그인이 필요합니다.'})
             return
     try:
-        data = read_json(handler, BACKUP_LIMIT if path == '/app/api/manage/restore' else 16_384)
+        data = read_json(handler, BACKUP_LIMIT if path == '/app/api/manage/restore' else
+                         65_536 if path == '/app/api/manage/glossary' else 16_384)
     except (ValueError, TypeError, json.JSONDecodeError) as exc:
         respond(handler, 400, {"error": str(exc)})
         return
@@ -641,6 +647,23 @@ def handle_post(handler, connect, token, store_progress, delete_progress):
             db.execute('INSERT OR IGNORE INTO reader_sources(host) VALUES(?)', (host,))
         respond(handler, 200, {'ok': True, 'host': host})
         return
+    if path == '/app/api/manage/glossary':
+        work_id = data.get('work_id')
+        try:
+            if not isinstance(work_id, str) or not valid_work_id(work_id) or not shuba_work(work_id):
+                raise ValueError('중국 소설의 작품 ID가 필요합니다.')
+            terms = reader_translate.checked_glossary(data.get('glossary'))
+        except ValueError as exc:
+            respond(handler, 400, {'error': str(exc)})
+            return
+        with connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            if not db.execute('SELECT 1 FROM reader_works WHERE work_id=?', (work_id,)).fetchone():
+                respond(handler, 404, {'error': '등록된 작품이 아닙니다.'})
+                return
+            reader_translate.save_glossary(db, work_id, terms)
+        respond(handler, 200, {'ok': True})
+        return
     if path == '/app/api/manage/restore':
         try:
             if data.get('confirm') is not True:
@@ -669,6 +692,8 @@ def handle_post(handler, connect, token, store_progress, delete_progress):
                     'ready' if paragraphs else 'missing', now))
             repair_shuba_order(db, work_id)
             reader_translate.restore(db, work_id, backup['translations'])
+            if shuba_work(work_id):
+                reader_translate.save_glossary(db, work_id, backup['glossary'])
             # Bump the current server revision, never reuse the backup's old revision.
             delete_progress(db, 'novel', work_id, clear=True)
             if backup['progress']:
