@@ -14,6 +14,7 @@ from urllib.parse import parse_qs, urlparse
 import reader_auth
 import reader_openai
 import reader_translate
+import reader_usage
 
 from reader_crawl import (CrawlUnavailable, HumanVerificationRequired, LockedChapter,
                           HOSTS, SHUBA_HOSTS, WORK_ID_PATTERN, checked_host, supported_host, checked_url,
@@ -447,7 +448,10 @@ def handle_get(handler, connect, token):
         return
     with connect() as db:
         if path == '/app/api/manage/resources':
-            respond(handler, 200, resource_snapshot(db))
+            db.execute('BEGIN')
+            resources = resource_snapshot(db)
+            resources['translation_usage'] = reader_usage.snapshot(db)
+            respond(handler, 200, resources)
             return
         if path == '/app/api/manage/backup':
             work_id = parse_qs(urlparse(handler.path).query).get('work_id', [''])[0]
@@ -753,6 +757,7 @@ def handle_post(handler, connect, token, store_progress, delete_progress):
         with connect() as db:
             db.execute('BEGIN IMMEDIATE')
             delete_progress(db, 'novel', work_id, clear=True)
+            reader_usage.unlink_work(db, work_id)
             for table in ('reader_translations', 'reader_jobs', 'reader_episodes', 'reader_works', 'reader_work_settings'):
                 db.execute(f'DELETE FROM {table} WHERE work_id=?', (work_id,))
         respond(handler, 200, {'ok': True})

@@ -60,7 +60,7 @@ class TranslationTest(unittest.TestCase):
         return base
 
     @staticmethod
-    def fake_response(payload):
+    def fake_response(payload, **kwargs):
         assert payload['model'] == 'gpt-6-luna'
         assert payload['reasoning']['effort'] == 'none'
         assert payload.get('service_tier') == 'default'
@@ -162,7 +162,7 @@ class TranslationTest(unittest.TestCase):
         self.descending_source(['原文段落。'*8]*100)
         for episode in ('1', '2', '3'):
             self.request('/app/api/episode/69shuba-999/'+episode+'/translate', {})
-        def translate(payload):
+        def translate(payload, **kwargs):
             result = json.loads(self.fake_response(payload))
             items = json.loads(payload['input'][0]['content'])['items']
             for source, target in zip(items, result['items']):
@@ -314,7 +314,7 @@ class TranslationTest(unittest.TestCase):
         with reader_sync.connect() as db:
             self.assertEqual(db.execute("SELECT count(*) FROM reader_translations WHERE state='queued'").fetchone()[0], 0)
         self.request(endpoint, {'work_id':'69shuba-999','settings':{'paused':0}})
-        def disable(payload):
+        def disable(payload, **kwargs):
             self.request(endpoint, {'work_id':'69shuba-999','settings':{'translation_prefetch':0}})
             return self.fake_response(payload)
         with patch.object(reader_openai, 'response_text', side_effect=disable) as call:
@@ -390,7 +390,7 @@ class TranslationTest(unittest.TestCase):
             db.execute('UPDATE reader_translations SET updated_at=1')
         queued = self.request(base)[1]['translation']
         self.assertEqual((queued['state'], queued['updated_at']), ('queued', 1))
-        def translated(payload):
+        def translated(payload, **kwargs):
             running = self.request(base)[1]['translation']
             self.assertEqual(running['state'], 'running')
             self.assertGreater(running['updated_at'], queued['updated_at'])
@@ -490,7 +490,7 @@ class TranslationTest(unittest.TestCase):
         base = self.source([original])
         self.request(base + '/translate', {})
         count = 0
-        def fail_once(payload):
+        def fail_once(payload, **kwargs):
             nonlocal count
             count += 1
             if count == 2: raise reader_openai.OpenAIError('quota', '사용 한도')
@@ -521,7 +521,7 @@ class TranslationTest(unittest.TestCase):
     def test_deletion_invalidates_late_translation(self):
         base = self.source()
         self.request(base + '/translate', {})
-        def deleting(payload):
+        def deleting(payload, **kwargs):
             self.assertEqual(self.request('/app/api/manage/delete', {'work_id': '69shuba-999', 'confirm': True})[0], 200)
             return self.fake_response(payload)
         with patch.object(reader_openai, 'response_text', side_effect=deleting):

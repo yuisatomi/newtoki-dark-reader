@@ -64,7 +64,7 @@ class GlossaryTest(unittest.TestCase):
         base = self.source(['顾安来到太玄门。'])
         self.save({'顾安': '고안', '太玄门': '태현문', '李涯': '이애'})
         before = self.request('/app/api/work/999')[1]['progress']
-        def translated(payload):
+        def translated(payload, **kwargs):
             body = json.loads(payload['input'][0]['content'])
             self.assertEqual(body['glossary'], {'顾安': '고안', '太玄门': '태현문'})
             self.assertIn('한국 한자 독음', payload['instructions'])
@@ -88,7 +88,7 @@ class GlossaryTest(unittest.TestCase):
     def test_new_terms_are_shared_between_chunks_and_chapters_without_extra_calls(self):
         base = self.source(['姜琼。'+'中'*6100, '姜琼又来了。'])
         calls = []
-        def translated(payload):
+        def translated(payload, **kwargs):
             body = json.loads(payload['input'][0]['content'])
             calls.append(body)
             if len(calls) > 1 and any('姜琼' in item['text'] for item in body['items']):
@@ -106,7 +106,7 @@ class GlossaryTest(unittest.TestCase):
     def test_bad_suggestions_cannot_poison_the_glossary_or_drop_valid_content(self):
         base = self.source(['顾安来了。'])
         self.save({'顾安': '고안'})
-        def translated(payload):
+        def translated(payload, **kwargs):
             value = json.loads(self.fake_response(payload))
             value['terms'] = [{'source': '顾安', 'target': '구안'}, {'source': '不存在', 'target': '신명'},
                               {'source': '顾安', 'target': 'Gu An'}, {'source': '来了', 'target': '오다'},
@@ -121,7 +121,7 @@ class GlossaryTest(unittest.TestCase):
     def test_late_result_cannot_recreate_deleted_work_or_override_manual_terms(self):
         base = self.source(['顾安来了。'])
         self.request(base+'/translate', {})
-        def translated(payload):
+        def translated(payload, **kwargs):
             self.save({'顾安': '고안'})
             value = json.loads(self.fake_response(payload))
             value['terms'] = [{'source': '顾安', 'target': '구안'}]
@@ -131,7 +131,7 @@ class GlossaryTest(unittest.TestCase):
             reader_translate.run_one(reader_sync.connect)
         self.assertEqual(self.glossary(), {'顾安': '고안'})
         self.request('/app/api/episode/69shuba-999/2/translate', {})
-        def deleting(payload):
+        def deleting(payload, **kwargs):
             self.request('/app/api/manage/delete', {'work_id': '69shuba-999', 'confirm': True})
             return translated(payload)
         with patch.object(reader_openai, 'response_text', side_effect=deleting):

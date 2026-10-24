@@ -271,7 +271,7 @@ def disconnect():
     return message
 
 
-def response_text(payload):
+def response_text(payload, on_response=None):
     token = access_token()
     for attempt in range(2):
         try:
@@ -296,6 +296,9 @@ def response_text(payload):
                     event = json.loads('\n'.join(event_data))
                     event_data = []
                     kind = event.get('type')
+                    if kind in ('response.completed', 'response.failed', 'response.incomplete') and on_response:
+                        final = event.get('response') or {}
+                        on_response({key: final.get(key) for key in ('id', 'model', 'service_tier', 'usage', 'status')})
                     if kind == 'response.output_text.delta':
                         text.append(event.get('delta', ''))
                     elif kind in ('error', 'response.failed', 'response.incomplete'):

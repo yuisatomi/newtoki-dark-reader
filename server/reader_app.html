@@ -33,6 +33,7 @@
   #manage-list textarea { display:block; width:100%; min-height:140px; padding:10px; resize:vertical; }
   .cached-episodes ul { max-height:40vh; overflow:auto; padding-left:24px; }
   .cached-episodes li { margin:8px 0; overflow-wrap:anywhere; }
+  #translation-usage li { margin:10px 0; overflow-wrap:anywhere; }
   #restore-file { max-width:100%; }
   .resource-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:16px; }
   .resource-grid h3 { margin:8px 0; font-size:1rem; }
@@ -114,7 +115,20 @@
     </div>
     <p class="muted">이 화면이 보일 때만 10초마다 갱신합니다. DB에서 내용을 삭제해도 파일 크기는 바로 줄지 않으며, 빈 공간을 다음 저장에 재사용합니다.</p>
   </section>
-  <p class="muted">전체 삭제는 읽은 회차·위치, 회차 목록, 저장 본문과 수집 작업을 제거합니다. 다른 기기에는 다음 동기화 때 반영됩니다. 재업로드 방지용 삭제 표시와 기존 서버 백업은 남습니다.</p>
+  <section class="card" id="translation-usage" aria-labelledby="translation-usage-heading">
+    <h2 id="translation-usage-heading">번역 토큰 · API 요금 환산액</h2>
+    <p class="muted">ChatGPT OAuth의 실제 청구액이 아닙니다. 이 뷰어의 읽기·미리 번역·재시도 요청 중 서버가 보고한 토큰만 집계합니다. 진행 중 토큰은 응답 완료 후 반영하며 다른 앱의 사용량은 포함하지 않습니다. 리소스와 함께 10초마다 갱신합니다.</p>
+    <div class="resource-grid">
+      <div><h3>누적</h3><p id="usage-total">확인 중…</p><p id="usage-total-detail" class="muted"></p></div>
+      <div><h3>오늘 (한국 시간)</h3><p id="usage-today">확인 중…</p><p id="usage-today-detail" class="muted"></p></div>
+    </div>
+    <p id="usage-note" class="message" role="status"></p>
+    <p id="usage-rates" class="muted"></p>
+    <a href="https://developers.openai.com/api/docs/models/gpt-6-luna" target="_blank" rel="noopener noreferrer">공식 모델 요금 확인</a>
+    <h3>작품별 누적</h3><ul id="usage-works"></ul>
+    <details><summary>최근 번역 요청 20건</summary><ul id="usage-recent"></ul></details>
+  </section>
+  <p class="muted">전체 삭제는 읽은 회차·위치, 회차 목록, 저장 본문과 수집 작업을 제거합니다. 다른 기기에는 다음 동기화 때 반영됩니다. 사용량 이력은 작품 연결 정보를 제거한 뒤 누적 집계에 남으며 재업로드 방지용 삭제 표시와 기존 서버 백업도 남습니다.</p>
   <section class="card"><h2>수집 도메인 등록</h2>
     <form id="source-add-form" class="toolbar"><input id="source-add-host" aria-label="새 수집 도메인" placeholder="예: toki33.com" maxlength="80" autocapitalize="none" spellcheck="false" required><button>도메인 등록</button></form>
     <p class="muted">newtoki숫자.org · toki숫자.com · www.69shuba.com을 지원합니다. https://와 경로 없이 입력하세요. 작품의 같은 사이트 계열 안에서 출처를 변경할 수 있습니다.</p>
@@ -131,7 +145,7 @@
   <p>한 소유자의 모든 기기가 같은 읽기 기록을 공유합니다.</p>
   <section class="card" id="translation-account">
     <h2>중국 소설 번역 · ChatGPT 연결</h2>
-    <p>GPT-6 Luna로 실제 여는 회차만 한국어로 번역합니다. 원문 미리 수집은 번역 사용량을 소모하지 않습니다. 저장된 번역은 모든 기기에서 재사용합니다.</p>
+    <p>GPT-6 Luna로 실제 여는 회차와 설정한 다음 회차를 한국어로 번역합니다. 원문 미리 수집만으로는 번역 사용량을 소모하지 않습니다. 저장된 번역은 모든 기기에서 재사용합니다.</p>
     <p id="translation-account-status" class="message" role="status"></p>
     <button id="translation-account-refresh">연결 상태 새로고침</button>
     <button id="translation-account-disconnect" disabled>ChatGPT 연결 해제</button>
@@ -253,6 +267,27 @@
     const percent=Number.isFinite(used)&&Number.isFinite(total)&&total>0 ? ' ('+(used/total*100).toFixed(1)+'%)' : '';
     return bytes(used)+' / '+bytes(total)+percent;
   }
+  const tokenCount=value=>Number.isFinite(value)?value.toLocaleString('ko-KR'):'미확인';
+  const dollars=value=>Number.isFinite(value)?'$'+value.toFixed(6):'금액 미확인';
+  function renderTranslationUsage(data) {
+    if(!data){note('usage-note','사용량 집계를 지원하는 서버로 업데이트해야 합니다.');return;}
+    const amount=item=>tokenCount(item.total_tokens)+' 토큰 · '+dollars(item.cost_usd)+(item.unpriced?' + 미확인 '+item.unpriced+'건':'');
+    for(const [name,item] of [['total',data.total],['today',data.today]]) {
+      note('usage-'+name,amount(item));
+      note('usage-'+name+'-detail',`보고분 입력 ${tokenCount(item.input_tokens)} (캐시 읽기 ${tokenCount(item.cached_tokens)} · 쓰기 ${tokenCount(item.cache_write_tokens)}) · 출력 ${tokenCount(item.output_tokens)} (추론 포함 ${tokenCount(item.reasoning_tokens)}) · ${item.requests}요청 / 진행 ${item.running} / 실패·중단 ${item.failed}`);
+    }
+    note('usage-note',`기능 적용 이후 집계 · 과거 사용량을 복원할 수 없는 저장 번역 ${data.untracked_cached}개 · 사용량 미보고 ${data.total.unreported}건 · 금액 미확인 ${data.total.unpriced}건. 미확인은 0이 아니며 표시 합계에 누락된 사용량이 있을 수 있습니다.`);
+    const r=data.rates;
+    note('usage-rates',`${data.model} · 일반 처리 100만 토큰당 입력 $${r.input} / 캐시 읽기 $${r.cached_input} / 캐시 쓰기 $${r.cache_write} / 출력 $${r.output} · 요금 확인 ${data.price_date}. 응답 처리 등급·긴 입력 할증을 반영하고 추론은 출력에 중복 합산하지 않습니다. USD 기준, 세금·환율 미적용.`);
+    const works=$('usage-works'),recent=$('usage-recent');works.replaceChildren();recent.replaceChildren();
+    for(const item of data.works)works.append(node('li',(item.title||item.work_id)+' · '+amount(item)+' · '+item.requests+'요청'));
+    if(!data.works.length)works.append(node('li','기록된 번역 요청이 없습니다.'));
+    const states={running:'진행 중',completed:'완료',failed:'실패',interrupted:'중단'};
+    for(const item of data.recent) {
+      const when=new Date(item.started_at).toLocaleString('ko-KR',{timeZone:'Asia/Seoul'});
+      recent.append(node('li',`${when} · ${item.work_title||'작품'} · ${item.episode_title} · ${item.prefetch?'미리 번역':'읽기 번역'} · ${states[item.state]||item.state} · ${item.model} / ${item.service_tier||'등급 미보고'} · 입력 ${tokenCount(item.input_tokens)} / 출력 ${tokenCount(item.output_tokens)} · ${dollars(item.cost_usd)}${item.note?' · '+item.note:''}`));
+    }
+  }
   async function refreshResources() {
     clearTimeout(resourcesTimer);resourcesTimer=null;
     if(resourcesLoading || document.hidden || $('manage').classList.contains('hidden'))return;
@@ -260,6 +295,7 @@
     try {
       const info=await api('manage/resources'),memory=info.memory,disk=info.disk,db=info.database;
       if($('manage').classList.contains('hidden'))return;
+      renderTranslationUsage(info.translation_usage);
       $('resource-memory').textContent='사용 '+usage(memory.used,memory.total);
       $('resource-memory-detail').textContent='사용 가능 '+bytes(memory.available)+' · '+(memory.source==='cgroup'?'컨테이너 cgroup 한도 기준, 캐시 포함':'운영체제 제공값, 회수 가능한 캐시 제외')
         +(memory.source!=='cgroup'&&memory.cache_inclusive!==null?' · cgroup 캐시 포함 사용량 '+bytes(memory.cache_inclusive):'');

@@ -8,6 +8,7 @@ import threading
 import time
 
 import reader_openai
+import reader_usage
 
 MODEL = reader_openai.MODEL
 # Keep completed translations and old backups; the new policy affects only untranslated batches.
@@ -29,6 +30,7 @@ def init_db(connect):
             PRIMARY KEY(work_id,episode_id,source_hash,language,model,prompt_version))''')
         if 'prefetch' not in {row[1] for row in db.execute('PRAGMA table_info(reader_translations)')}:
             db.execute('ALTER TABLE reader_translations ADD COLUMN prefetch INTEGER NOT NULL DEFAULT 0')
+    reader_usage.init_db(connect)
 
 
 def fingerprint(title, paragraphs):
@@ -95,7 +97,7 @@ def save_glossary(db, work_id, value, merge=False):
                (work_id, json.dumps(value, ensure_ascii=False, sort_keys=True)))
 
 
-def translate_chunk(items, known_terms=None):
+def translate_chunk(items, known_terms=None, on_response=None):
     schema = {'type': 'object', 'properties': {'items': {'type': 'array', 'items': {
         'type': 'object', 'properties': {'id': {'type': 'string'}, 'text': {'type': 'string'}},
         'required': ['id', 'text'], 'additionalProperties': False}}},
@@ -118,7 +120,7 @@ def translate_chunk(items, known_terms=None):
                'input': [{'role': 'user', 'content': json.dumps({'items': items, 'glossary': relevant}, ensure_ascii=False)}],
                'text': {'format': {'type': 'json_schema', 'name': 'translated_paragraphs', 'strict': True, 'schema': schema}}}
     try:
-        response = json.loads(reader_openai.response_text(payload))
+        response = json.loads(reader_openai.response_text(payload, on_response=on_response))
         result = response['items']
         if not isinstance(result, list) or len(result) != len(items):
             raise ValueError()
@@ -221,7 +223,15 @@ def run_one(connect, prepare_prefetch=None):
                     return True
                 within_capacity(db, key[0], 0)
                 known_terms = glossary(db, key[0])
-            translated, terms = translate_chunk(batch, known_terms)
+            request_id = reader_usage.begin(connect, dict(source) | {'source_hash': key[2]}, MODEL, job['prefetch'])
+            observation = {}
+            try:
+                translated, terms = translate_chunk(batch, known_terms, observation.update)
+            except Exception:
+                reader_usage.finish(connect, request_id, observation, 'failed')
+                raise
+            else:
+                reader_usage.finish(connect, request_id, observation, 'completed')
             completed.append(translated)
             serialized = json.dumps(completed, ensure_ascii=False)
             with connect() as db:
@@ -262,6 +272,7 @@ def run_one(connect, prepare_prefetch=None):
 
 
 def start_worker(connect, prepare_prefetch=None):
+    reader_usage.interrupt(connect)
     with connect() as db:
         db.execute("UPDATE reader_translations SET state='error',error='서버가 재시작되었습니다. 직접 다시 시도하세요.',code='interrupted',run_token='' WHERE state='running'")
 
