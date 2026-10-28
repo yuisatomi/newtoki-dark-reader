@@ -4,7 +4,8 @@ import secrets
 import threading
 import time
 
-from reader_crawl import BROWSER_CONTENT_READY, CrawlUnavailable, browser_endpoint, checked_url, source_browser
+from reader_crawl import (BROWSER_CONTENT_READY, BROWSER_SHADOW_CAPTURE, CrawlUnavailable, browser_endpoint, checked_url,
+                          source_browser, source_page, work_url)
 
 _lock = threading.Lock()
 _active = None
@@ -58,6 +59,50 @@ def tab(browser, session):
     raise VerificationError(410, '대기 중인 원본 탭이 닫히거나 이동했습니다. 확인 창을 다시 여세요.')
 
 
+def reopen_tab(browser, session, connect):
+    from playwright.sync_api import TimeoutError as BrowserTimeout
+    url = work_url(session['host'], session['work_id'], session['episode_id'] or None)
+    expected = checked_url(url)
+    page = None
+    try:
+        with source_page(browser, url, session['work_id'], dedicated=True) as page:
+            page.add_init_script(BROWSER_SHADOW_CAPTURE)
+            def only_target(route):
+                request = route.request
+                if request.is_navigation_request() and request.frame == page.main_frame:
+                    try:
+                        if checked_url(request.url) != expected or not current(connect, session):
+                            route.abort()
+                            return
+                    except (ValueError, VerificationError):
+                        route.abort()
+                        return
+                route.fallback()
+            page.route('**/*', only_target)
+            try:
+                if not current(connect, session):
+                    raise VerificationError(410, '대기 작업이 변경되었습니다. 확인 창을 다시 여세요.')
+                try:
+                    page.goto(url, wait_until='domcontentloaded', timeout=8000)
+                except BrowserTimeout:
+                    if checked_url(page.url) != expected:
+                        raise
+                if checked_url(page.url) != expected:
+                    raise VerificationError(410, '요청한 회차가 다른 페이지로 이동했습니다.')
+                channel = page.context.new_cdp_session(page)
+                try:
+                    session['target'] = channel.send('Target.getTargetInfo')['targetInfo']['targetId']
+                finally:
+                    channel.detach()
+                return page
+            finally:
+                page.unroute('**/*', only_target)
+    except Exception:
+        if page is not None and not page.is_closed():
+            page.close()
+        raise
+
+
 def operate(connect, work_id, owner, data):
     global _active
     action = data.get('action')
@@ -104,7 +149,13 @@ def operate(connect, work_id, owner, data):
                 _active = None
                 return {'state': 'finished', 'message': '대기 상태가 변경되었습니다. 수집 상태를 확인하세요.'}
             with source_browser() as browser:
-                page = tab(browser, session)
+                try:
+                    page = tab(browser, session)
+                except VerificationError as error:
+                    if action != 'open' or error.status != 410:
+                        raise
+                    # Only an explicit open may restore a lost tab; polling/input must never navigate.
+                    page = reopen_tab(browser, session, connect)
                 if action in ('open','click','key'):
                     page.bring_to_front()
                 if page.evaluate(BROWSER_CONTENT_READY):

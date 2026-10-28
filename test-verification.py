@@ -39,6 +39,8 @@ class VerificationTest(unittest.TestCase):
         self.channel = Mock()
         self.channel.send.return_value = {'targetInfo':{'targetId':'fixed-tab'}}
         self.context = Mock(pages=[self.page])
+        self.page.context = self.context
+        self.page.is_closed.return_value = False
         self.context.new_cdp_session.return_value = self.channel
         self.browser = Mock(contexts=[self.context])
         self.connectPatch = patch.object(control, 'source_browser')
@@ -60,6 +62,91 @@ class VerificationTest(unittest.TestCase):
         self.assertEqual(base64.b64decode(data['image']), b'jpeg-test')
         self.assertEqual(headers['Cache-Control'], 'no-store')
         return data
+
+    def lose_tab(self):
+        self.context.pages=[]
+        self.page.url='about:blank'
+        def create():
+            self.context.pages.append(self.page)
+            return self.page
+        self.context.new_page.side_effect=create
+        self.page.goto.side_effect=lambda url,**kwargs: setattr(self.page,'url',url)
+
+    def test_explicit_open_restores_missing_tab_once_without_touching_other_tabs(self):
+        self.lose_tab()
+        other=Mock(url='https://toki32.com/novel/111/5')
+        self.context.pages.append(other)
+        first=self.opened()
+        self.context.new_page.assert_called_once()
+        self.page.goto.assert_called_once_with('https://toki32.com/novel/999/91',wait_until='domcontentloaded',timeout=8000)
+        other.goto.assert_not_called()
+        other.close.assert_not_called()
+        self.assertEqual(self.request(self.path,{'action':'frame','session':first['session']})[0],200)
+        self.page.goto.assert_called_once()
+        self.page.mouse.click.assert_not_called()
+
+    def test_background_frame_never_restores_closed_tab_and_old_input_stays_invalid(self):
+        first=self.opened()
+        self.lose_tab()
+        self.assertEqual(self.request(self.path,{'action':'frame','session':first['session']})[0],410)
+        self.context.new_page.assert_not_called()
+        self.opened()
+        old={'action':'click','session':first['session'],'frame':first['frame'],'x':90,'y':300}
+        self.assertEqual(self.request(self.path,old)[0],403)
+        self.page.mouse.click.assert_not_called()
+
+    def test_restored_page_ready_resumes_with_original_position_preserved(self):
+        self.lose_tab();self.ready=True
+        with patch.object(reader_app,'ready_verification_pages',return_value={('toki32.com','999','91')}):
+            result=self.request(self.path,{'action':'open'})[1]
+        self.assertEqual(result['state'],'ready')
+        self.context.new_page.assert_called_once()
+        with reader_sync.connect() as db:
+            self.assertEqual(db.execute("SELECT state FROM reader_jobs WHERE episode_id='91'").fetchone()[0],'queued')
+            self.assertEqual(db.execute("SELECT position FROM progress WHERE work_id='999'").fetchone()[0],.6)
+
+    def test_recovery_navigation_rejects_other_hosts_works_and_episodes(self):
+        self.lose_tab();self.opened()
+        guard=self.page.route.call_args_list[-1].args[1]
+        for url in ('http://127.0.0.1/private','https://toki33.com/novel/999/91',
+                    'https://toki32.com/novel/111/91','https://toki32.com/novel/999/92'):
+            route=Mock();route.request.url=url;route.request.frame=self.page.main_frame
+            route.request.is_navigation_request.return_value=True
+            guard(route)
+            route.abort.assert_called_once()
+            route.fallback.assert_not_called()
+        route=Mock();route.request.url='https://toki32.com/novel/999/91';route.request.frame=self.page.main_frame
+        route.request.is_navigation_request.return_value=True
+        guard(route);route.fallback.assert_called_once()
+
+    def test_recovery_source_change_and_bad_redirect_close_only_created_tab(self):
+        self.lose_tab()
+        create=self.context.new_page.side_effect
+        def changed():
+            page=create()
+            with reader_sync.connect() as db: db.execute("UPDATE reader_works SET host='toki33.com' WHERE work_id='999'")
+            return page
+        self.context.new_page.side_effect=changed
+        self.assertEqual(self.request(self.path,{'action':'open'})[0],410)
+        self.page.goto.assert_not_called();self.page.close.assert_called_once()
+        with reader_sync.connect() as db: db.execute("UPDATE reader_works SET host='toki32.com' WHERE work_id='999'")
+        self.page.close.reset_mock();self.lose_tab()
+        self.page.goto.side_effect=lambda *args,**kwargs:setattr(self.page,'url','https://evil.invalid/')
+        self.assertEqual(self.request(self.path,{'action':'open'})[0],503)
+        self.page.close.assert_called_once()
+        self.page.screenshot.assert_not_called()
+
+    def test_recovery_slow_committed_page_is_not_reloaded_or_retried(self):
+        from playwright.sync_api import TimeoutError as BrowserTimeout
+        self.lose_tab()
+        def slow(url,**kwargs):
+            self.page.url=url
+            raise BrowserTimeout('slow DOM')
+        self.page.goto.side_effect=slow
+        first=self.opened()
+        self.assertEqual(self.request(self.path,{'action':'frame','session':first['session']})[0],200)
+        self.page.goto.assert_called_once()
+        self.page.close.assert_not_called()
 
     def test_authentication_scope_and_no_arbitrary_commands(self):
         for kwargs, expected in (({'cookie':False},401),({'cookie':False,'bearer':True},401),({'app_header':False},403)):
@@ -222,7 +309,8 @@ class VerificationTest(unittest.TestCase):
         self.connectPatch.stop()
         profile=Path(self.temp.name)/'browser-profile'
         process=subprocess.Popen([executable,'--headless=new','--remote-debugging-address=127.0.0.1',
-            '--remote-debugging-port=0','--user-data-dir='+str(profile),'--no-first-run','--no-default-browser-check','about:blank'],
+            '--remote-debugging-port=0','--user-data-dir='+str(profile),'--no-first-run','--no-default-browser-check',
+            '--host-resolver-rules=MAP toki32.com ~NOTFOUND, MAP challenges.cloudflare.com ~NOTFOUND','about:blank'],
             stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
         try:
             port_file=profile/'DevToolsActivePort'
@@ -242,13 +330,15 @@ class VerificationTest(unittest.TestCase):
                             <title>Just a moment...</title><h1>Synthetic human confirmation</h1><div id=closed></div><script>
                             const root=document.querySelector('#closed').attachShadow({mode:'closed'});
                             root.innerHTML='<iframe src="https://challenges.cloudflare.com/test-only" style="position:absolute;left:100px;top:150px;width:300px;height:90px;border:0"></iframe>';
+                            root.querySelector('iframe').onload=()=>document.documentElement.dataset.testWidgetReady='1';
                             window.addEventListener('message',e=>{if(e.origin!=='https://challenges.cloudflare.com'||e.data!=='test-approved')return;
-                            document.title='Test source ready';document.body.innerHTML='<div data-theme-novel-content><p>'+('테스트 본문 '.repeat(30))+'</p></div>';});</script>""")
+                            document.title='Test source ready';document.body.innerHTML='<div data-theme-novel-content></div>';
+                            document.querySelector('div').attachShadow({mode:'closed'}).innerHTML='<p>'+('테스트 본문 '.repeat(30))+'</p>';});</script>""")
                 source_context.route('https://**/*',serve)
-                source=source_context.new_page()
+                source=None
                 for viewport,touch in (({'width':390,'height':844},True),({'width':1280,'height':900},False)):
                     control._active=None
-                    source.goto('https://toki32.com/novel/999/91',wait_until='networkidle')
+                    if source is not None: source.close()
                     with reader_sync.connect() as db:
                         db.execute("UPDATE reader_jobs SET state='verification',run_token='test-run' WHERE episode_id='91'")
                         db.execute("UPDATE reader_episodes SET state='verification',paragraphs_json=NULL WHERE episode_id='91'")
@@ -261,6 +351,10 @@ class VerificationTest(unittest.TestCase):
                     expect(page.locator('#site-verification')).to_be_visible()
                     expect(page.locator('#site-image')).to_be_visible()
                     expect(page.locator('#site-message')).to_contain_text('확인 대기 중')
+                    source=next(p for p in source_context.pages if p.url=='https://toki32.com/novel/999/91')
+                    source.wait_for_function("document.documentElement.dataset.testWidgetReady==='1'")
+                    page.locator('#site-reconnect').click()
+                    expect(page.locator('#site-reconnect')).to_be_enabled()
                     self.assertLessEqual(page.evaluate('document.documentElement.scrollWidth'),viewport['width'])
                     artifacts=Path(__file__).with_name('build');artifacts.mkdir(exist_ok=True)
                     page.screenshot(path=str(artifacts/('site-check-mobile.png' if touch else 'site-check-desktop.png')))

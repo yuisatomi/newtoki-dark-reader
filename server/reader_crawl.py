@@ -22,6 +22,15 @@ USER_AGENT = "ReaderSync/1.0"
 EPISODE_PATH = re.compile(r"^/novel/([0-9]+)/([0-9]+)$")
 WORK_PATH = re.compile(r"^/novel/([0-9]+)(?:/([0-9]+))?/?$")
 VERIFICATION_WAIT_MS = 30000
+BROWSER_SHADOW_CAPTURE = """
+      (() => { const original = Element.prototype.attachShadow;
+        Element.prototype.attachShadow = function(options) {
+          const root = original.call(this, options);
+          (window.__readerShadows ||= new Map()).set(this, root);
+          return root;
+        };
+      })();
+"""
 BROWSER_CONTENT_READY = r"""() => {
   if (/Just a moment/i.test(document.title)) return false;
   const path = location.pathname;
@@ -120,13 +129,13 @@ def source_browser():
 
 
 @contextmanager
-def source_page(browser, url, work_id):
+def source_page(browser, url, work_id, *, dedicated=False):
     shared = bool(browser_endpoint())
     proxy = source_proxy()
     context = (browser.contexts[0] if shared else browser.new_context(
         service_workers="block", **({"proxy": {"server": proxy}} if proxy else {})))
     host = urlparse(url).hostname
-    pages = [p for p in context.pages if urlparse(p.url).hostname == host] if shared else []
+    pages = [p for p in context.pages if urlparse(p.url).hostname == host] if shared and not dedicated else []
     page = next((p for p in pages if urlparse(p.url).path.rstrip('/') == urlparse(url).path.rstrip('/')),
                 pages[0] if pages else None)
     borrowed_page = page is not None
@@ -150,7 +159,7 @@ def source_page(browser, url, work_id):
                 return
         route.fallback()
     page.route("**/*", restrict_request)
-    keep_open = False
+    keep_open = dedicated
     try:
         yield page
     except HumanVerificationRequired:
@@ -473,15 +482,7 @@ def _collect_episode_list(source_url, work_id, delay, browser):
 def extract_episode(browser, url, work_id, episode_id):
     checked_url(url, work_id)
     with source_page(browser, url, work_id) as page:
-        page.add_init_script("""
-      (() => { const original = Element.prototype.attachShadow;
-        Element.prototype.attachShadow = function(options) {
-          const root = original.call(this, options);
-          (window.__readerShadows ||= new Map()).set(this, root);
-          return root;
-        };
-      })();
-        """)
+        page.add_init_script(BROWSER_SHADOW_CAPTURE)
         loaded = False
         try:
             loaded = checked_url(page.url) == checked_url(url) and page.evaluate(BROWSER_CONTENT_READY)
