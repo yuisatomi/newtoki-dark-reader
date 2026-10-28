@@ -19,7 +19,7 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
-MemoryMax=850M
+MemoryMax=1100M
 MemorySwapMax=384M
 OOMPolicy=stop
 
