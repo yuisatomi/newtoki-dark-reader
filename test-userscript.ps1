@@ -25,7 +25,8 @@ if (-not $source.Contains("document.querySelector('.ne-h1')?.textContent.trim()"
 if (-not $source.Contains("replace(/^‹\s*|\s*›$/g, '') === label")) { throw 'toki31 decorated episode navigation is unsupported.' }
 if (-not $source.Contains('el.shadowRoot.textContent')) { throw 'Novel readiness ignores Shadow DOM content.' }
 if (-not $source.Contains("addEventListener('novel-content-ready'")) { throw 'Novel completion event is not observed.' }
-if (-not $source.Contains('// @updateURL    https://raw.githubusercontent.com/yuisatomi/newtoki-dark-reader/main/newtoki-dark-reader.user.js')) { throw 'Automatic update URL is missing.' }
+$installUrl = 'https://raw.githubusercontent.com/yuisatomi/newtoki-dark-reader/source/newtoki-dark-reader.user.js'
+if (-not $source.Contains("// @updateURL    $installUrl") -or -not $source.Contains("// @downloadURL  $installUrl")) { throw 'Automatic update or download URL is incorrect.' }
 if (-not $source.Contains('id="nt-warm"')) { throw 'Warm-tone control is missing.' }
 if (-not $source.Contains('data-theme="dark"') -or -not $source.Contains('data-theme="paper"')) { throw 'Reader theme presets are missing.' }
 if (-not $source.Contains("cfg.theme = cfg.theme === 'paper' ? 'paper' : 'dark'")) { throw 'Saved reader theme is not validated.' }

@@ -4,8 +4,8 @@
 // @version      5.18
 // @description  뉴토끼/toki31 소설·웹툰: 야간 다크/주간 종이색 본문 뷰어와 기기 간 읽기 위치 동기화
 // @homepageURL  https://github.com/yuisatomi/newtoki-dark-reader
-// @updateURL    https://raw.githubusercontent.com/yuisatomi/newtoki-dark-reader/main/newtoki-dark-reader.user.js
-// @downloadURL  https://raw.githubusercontent.com/yuisatomi/newtoki-dark-reader/main/newtoki-dark-reader.user.js
+// @updateURL    https://raw.githubusercontent.com/yuisatomi/newtoki-dark-reader/source/newtoki-dark-reader.user.js
+// @downloadURL  https://raw.githubusercontent.com/yuisatomi/newtoki-dark-reader/source/newtoki-dark-reader.user.js
 // @match        *://*/*
 // @run-at       document-end
 // @grant        GM_registerMenuCommand
