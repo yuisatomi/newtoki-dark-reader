@@ -9,6 +9,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import secrets
 import subprocess
 import sys
@@ -320,7 +321,7 @@ def response_text(payload, on_response=None):
     return ''.join(text)
 
 
-def authorize(previous=None, local_directory=None):
+def authorize(previous=None, local_directory=None, progress=None, cancel=None):
     previous = previous or {}
     directory = local_directory or Path.home() / '.config' / 'reader-sync-openai'
     host_path = directory / 'host.json'
@@ -359,10 +360,16 @@ def authorize(previous=None, local_directory=None):
             query['id_token_hint'] = previous['id_token']
         if not webbrowser.open(AUTH + '/api/accounts/authorize?' + urlencode(query)):
             raise OpenAIError('auth', 'PC에서 기본 브라우저를 열 수 없습니다.')
-        print('브라우저에서 ChatGPT 로그인과 플랜 사용 승인을 완료하세요.', flush=True)
+        message = '브라우저에서 ChatGPT 로그인과 플랜 사용 승인을 완료하세요.'
+        if progress:
+            progress(message)
+        else:
+            print(message, flush=True)
         deadline = time.monotonic() + 600
-        while not result and time.monotonic() < deadline:
+        while not result and time.monotonic() < deadline and not (cancel and cancel.is_set()):
             server.handle_request()
+    if cancel and cancel.is_set():
+        raise OpenAIError('cancelled', '연결을 취소했습니다. 서버에 인증 정보를 보내지 않았습니다.')
     if not result or result.get('error') or not result.get('code'):
         raise OpenAIError('auth', 'ChatGPT 연결이 취소되었거나 시간이 만료되었습니다.')
     issued = result.get('client_id', client_id)
@@ -374,6 +381,68 @@ def authorize(previous=None, local_directory=None):
     record = checked_tokens(tokens, issued, nonce, previous.get('subject'))
     record['nonce'] = nonce
     return record
+
+
+def connect_ssh(destination, identity_file=None, new_account=False, progress=None, cancel=None):
+    if not isinstance(destination, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.@:-]*', destination):
+        raise OpenAIError('ssh', '올바른 서버 SSH 주소를 입력하세요.')
+    ssh = ['ssh', '-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes', '-o', 'ConnectTimeout=10', '-o', 'KexAlgorithms=curve25519-sha256']
+    if identity_file:
+        key = Path(identity_file).expanduser()
+        if not key.is_file() or key.suffix.lower() == '.pub':
+            raise OpenAIError('ssh', '이 PC의 서버 접속용 SSH 개인키를 선택하세요. 공개키(.pub)는 사용할 수 없습니다.')
+        ssh += ['-i', str(key.resolve())]
+    ssh.append(destination)
+    command = 'runuser -u reader-sync -- /opt/reader-sync/venv/bin/python /opt/reader-sync/reader_openai.py '
+
+    def report(message):
+        if progress:
+            progress(message)
+
+    def remote(action, data=None, timeout=30):
+        try:
+            result = subprocess.run(ssh + [command + action], input=data, capture_output=True, timeout=timeout,
+                                    creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        except FileNotFoundError:
+            raise OpenAIError('ssh', 'Windows OpenSSH 클라이언트를 찾지 못했습니다. 이 PC의 SSH 설치를 확인하세요.') from None
+        except (OSError, subprocess.SubprocessError):
+            raise OpenAIError('ssh', '서버 연결이 중단되거나 시간이 만료되었습니다. 뷰어에서 연결 상태를 확인하세요.') from None
+        if result.returncode:
+            if action == '_import':
+                # Never display captured SSH output: it may contain credential diagnostics.
+                model = 'GPT-6 Luna'.encode() in result.stderr
+                raise OpenAIError('model' if model else 'ssh', '이 계정에서는 GPT-6 Luna를 사용할 수 없습니다.' if model else
+                                  '서버에 인증 정보를 등록하지 못했습니다. 네트워크·계정 권한을 확인한 뒤 다시 시도하세요.')
+            raise OpenAIError('ssh', '서버에 접속하지 못했습니다. 사내망·NetBird 연결과 등록된 SSH 키·호스트 키를 확인하세요.')
+        if len(result.stdout) > 200_000:
+            raise OpenAIError('ssh', '서버의 연결 응답을 확인할 수 없습니다.')
+        return result.stdout
+
+    report('서버와 안전한 연결을 확인하고 있습니다…')
+    try:
+        previous = json.loads(remote('_connection-info'))
+        if not isinstance(previous, dict) or not isinstance(previous.get('ext_agent_host_id'), str) or not previous['ext_agent_host_id']:
+            raise ValueError()
+    except (ValueError, UnicodeError):
+        raise OpenAIError('ssh', '서버의 인증 도우미 정보를 확인할 수 없습니다.') from None
+    if cancel and cancel.is_set():
+        raise OpenAIError('cancelled', '연결을 취소했습니다.')
+    if new_account:
+        previous = {'ext_agent_host_id': previous['ext_agent_host_id']}
+    record = authorize(previous, progress=report, cancel=cancel)
+    if cancel and cancel.is_set():
+        raise OpenAIError('cancelled', '연결을 취소했습니다. 서버에 인증 정보를 보내지 않았습니다.')
+    report('서버에 등록하고 Luna 사용 권한을 확인하고 있습니다…')
+    if cancel and cancel.is_set():
+        raise OpenAIError('cancelled', '연결을 취소했습니다. 서버에 인증 정보를 보내지 않았습니다.')
+    remote('_import', json.dumps(record).encode(), timeout=120)
+    try:
+        status = json.loads(remote('status'))
+        if not isinstance(status, dict) or status.get('connected') is not True or status.get('model') != MODEL or status.get('model_available') is not True:
+            raise ValueError()
+    except (ValueError, UnicodeError):
+        raise OpenAIError('ssh', '서버의 최종 연결 상태를 확인하지 못했습니다. 뷰어에서 연결 상태를 새로고침하세요.') from None
+    return {key: status[key] for key in ('connected', 'model', 'model_available', 'email') if key in status}
 
 
 def main():
@@ -405,19 +474,8 @@ def main():
         elif args.action == 'status':
             print(json.dumps(account_status(), ensure_ascii=False))
         else:
-            import re
-            if not args.ssh or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.@:-]*', args.ssh):
-                parser.error('--ssh에 기존 LXC SSH 주소를 입력하세요.')
-            ssh = ['ssh', '-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes', '-o', 'ConnectTimeout=10', '-o', 'KexAlgorithms=curve25519-sha256']
-            if args.identity_file:
-                ssh += ['-i', args.identity_file]
-            ssh.append(args.ssh)
-            command = 'runuser -u reader-sync -- /opt/reader-sync/venv/bin/python /opt/reader-sync/reader_openai.py '
-            previous = json.loads(subprocess.check_output(ssh + [command + '_connection-info'], timeout=30))
-            if args.new_account:
-                previous = {'ext_agent_host_id': previous['ext_agent_host_id']}
-            record = authorize(previous)
-            subprocess.run(ssh + [command + '_import'], input=json.dumps(record).encode(), check=True, timeout=120)
+            connect_ssh(args.ssh, args.identity_file, args.new_account, progress=lambda message: print(message, flush=True))
+            print('ChatGPT OAuth 연결 완료: ' + MODEL)
     except (OpenAIError, ValueError, OSError, subprocess.SubprocessError) as error:
         print(str(error) if isinstance(error, OpenAIError) else '연결 도우미 실행에 실패했습니다. SSH·의존성·연결 주소를 확인하세요.', file=sys.stderr)
         return 1

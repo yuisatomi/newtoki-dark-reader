@@ -468,6 +468,52 @@ class ReaderAppTest(unittest.TestCase):
         self.assertEqual(self.request('/app/api/work/8')[1]['list_job']['state'], 'queued')
         self.assertFalse(reader_app.run_one_job(reader_sync.connect))
 
+    def test_missing_body_notices_are_distinguished_from_collection_errors(self):
+        self.login()
+        work_id = '69shuba-7746'
+        notice_titles = {
+            '245': '第245章 今天晚上只有一更了，明天三更给大',
+            '233': '第233章 今晚有点急事，要请假一天，但明天',
+            '213': '第213章 晚上只能一更了，明天会三更补上！',
+            '211': '第211章 元宵节情人节快乐！',
+            '187': '第187章 新年快乐！',
+        }
+        other_titles = {
+            '246': ('第246章 新年快乐，玄京之战', reader_crawl.NO_EPISODE_BODY, 'error'),
+            '247': ('第247章 【公告】请假一天', '연결 시간 초과', 'error'),
+            '248': ('第248章 【公告】请假一天', '', 'ready'),
+            '249': ('第249章 【公告】请假一天', '사이트 확인 대기', 'verification'),
+            '250': ('第250章 【公告】请假一天', '', 'missing'),
+        }
+        episodes = {**{ep: (title, reader_crawl.NO_EPISODE_BODY, 'error') for ep, title in notice_titles.items()}, **other_titles}
+        with reader_sync.connect() as db:
+            db.execute("INSERT INTO reader_works VALUES(?,'www.69shuba.com','魔天记',1)", (work_id,))
+            for ep, (title, error, state) in episodes.items():
+                db.execute('''INSERT INTO reader_episodes VALUES(?,?,?,?,?,?,?,?,1)''',
+                           (work_id, ep, int(ep), title, f'https://www.69shuba.com/txt/7746/{ep}',
+                            '["원문"]' if state == 'ready' else None, state, error))
+                if state == 'error':
+                    db.execute("INSERT INTO reader_jobs(work_id,episode_id,state,attempts,error,updated_at) VALUES(?,?,'error',4,?,1)",
+                               (work_id, ep, error))
+            db.execute("INSERT INTO reader_jobs(work_id,episode_id,state,attempts,updated_at) VALUES(?,'250','queued',3,1)", (work_id,))
+        reader_app.browse_episode = Mock(side_effect=reader_crawl.CrawlUnavailable(reader_crawl.NO_EPISODE_BODY))
+        self.assertTrue(reader_app.run_one_job(reader_sync.connect))
+        work_path = '/app/api/work/' + work_id
+        episode_path = '/app/api/episode/' + work_id + '/'
+        chapters = {row['episode_id']: row['state'] for row in self.request(work_path)[1]['episodes']}
+        self.assertEqual(chapters, {**dict.fromkeys(notice_titles, 'notice'), '246': 'error', '247': 'error',
+                                   '248': 'ready', '249': 'verification', '250': 'notice'})
+        detail = self.request(episode_path + '245')[1]['episode']
+        self.assertEqual((detail['state'], detail['error'], detail['paragraphs']), ('notice', '', None))
+        managed = next(row for row in self.request('/app/api/manage')[1]['works'] if row['work_id'] == work_id)
+        self.assertEqual((managed['notices'], managed['failed'], managed['errors']), (6, 2, 2))
+        self.assertEqual(self.request('/app/api/manage/retry', {'work_id': work_id})[0], 200)
+        with reader_sync.connect() as db:
+            jobs = {row['episode_id']: row['state'] for row in db.execute('SELECT episode_id,state FROM reader_jobs WHERE work_id=?', (work_id,))}
+            self.assertEqual((jobs['245'], jobs['246'], jobs['247'], jobs['250']), ('error', 'queued', 'queued', 'error'))
+        self.assertEqual(self.request(episode_path + '245/retry', {})[0], 200)
+        self.assertEqual(self.request(episode_path + '245')[1]['episode']['state'], 'missing')
+
     def test_worker_waits_after_each_job(self):
         class StopLoop(BaseException):
             pass
@@ -1268,6 +1314,36 @@ class ReaderAppTest(unittest.TestCase):
                     db.execute("UPDATE reader_episodes SET title='갱신된 1화' WHERE work_id='999' AND episode_id='1'")
                 expect(page.locator('#episode-list button').first).to_have_text('갱신된 1화',timeout=5000)
                 self.assertEqual(page.locator('#episode-list').evaluate('el=>el.scrollTop'),600,'Later updates must preserve user scrolling')
+            finally:
+                browser.close()
+
+    def test_browser_notice_navigation(self):
+        try:
+            from playwright.sync_api import expect, sync_playwright
+        except ImportError:
+            self.skipTest('Playwright is not installed')
+        executable = os.environ.get('READER_TEST_BROWSER') or r'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe'
+        if not Path(executable).exists():
+            self.skipTest('A local Chromium browser is not available')
+        with reader_sync.connect() as db:
+            db.execute("INSERT INTO reader_works VALUES('8','newtoki1.org','시험',1)")
+            db.execute("INSERT INTO reader_episodes VALUES('8','1',1,'1화 [휴재 공지] 이번 주 일정','https://newtoki1.org/novel/8/1',NULL,'error',?,1)",
+                       (reader_crawl.NO_EPISODE_BODY,))
+            db.execute("INSERT INTO reader_episodes VALUES('8','2',2,'2화','https://newtoki1.org/novel/8/2',?,'ready','',1)",
+                       (json.dumps(['공지 다음 본문']),))
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True, executable_path=executable)
+            try:
+                page = browser.new_page(viewport={'width': 390, 'height': 800}, has_touch=True)
+                page.goto(self.base + '/app?work=8')
+                page.locator('#token').fill(reader_sync.SYNC_TOKEN)
+                page.locator('#login-form button').click()
+                page.get_by_role('button', name='[공지 회차] 1화 [휴재 공지] 이번 주 일정').click()
+                expect(page.locator('#reader-message')).to_contain_text('공지 회차')
+                expect(page.locator('#manual-save')).to_be_disabled()
+                expect(page.get_by_role('button', name='본문 다시 확인')).to_be_visible()
+                page.locator('#next').click()
+                expect(page.locator('#content p').first).to_have_text('공지 다음 본문')
             finally:
                 browser.close()
 

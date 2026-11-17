@@ -5,6 +5,8 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>소설 읽기</title>
 <style>
+  @font-face { font-family:'Maru Buri'; src:url('/app/fonts/MaruBuri-Regular.woff2') format('woff2');
+    font-weight:400; font-style:normal; font-display:swap; }
   :root { --bg:#0d1117; --text:#d7dde7; --title:#e6edf3; --surface:#161b22; --button:#21262d;
     --border:#30363d; --muted:#8b949e; --accent:#58a6ff; --primary:#1f6feb; --width:720px;
     --font:18px; --lh:2; color-scheme:dark; }
@@ -52,6 +54,7 @@
   #reader-title { font-size:calc(var(--font) * 1.25); border-bottom:1px solid var(--border); padding-bottom:14px; }
   #content { font-size:var(--font); line-height:var(--lh); letter-spacing:.01em; word-break:break-word; overflow-wrap:break-word; }
   #content p { margin:0 0 1.2em; }
+  #content:lang(ko) p { font-family:'Maru Buri','Noto Sans KR','Malgun Gothic',sans-serif; }
   #reader-nav { position:fixed; bottom:0; left:0; right:0; z-index:10; display:flex; flex-wrap:wrap;
     justify-content:center; gap:8px; padding:8px 12px calc(8px + env(safe-area-inset-bottom));
     background:var(--bg); border-top:1px solid var(--border); }
@@ -434,7 +437,7 @@
         }
         cachedRefresh.onclick=loadCached;cached.ontoggle=()=>{if(cached.open)loadCached();};
         cached.append(cachedSummary,cachedStatus,cachedRefresh,cachedList);card.append(cached);
-        card.append(node('p',`수집 대기/진행 ${row.pending}개 · 오류 작업 ${row.errors}개 · 사람 확인 대기 ${row.verification}개`));
+        card.append(node('p',`수집 대기/진행 ${row.pending}개 · 오류 작업 ${row.errors}개 · 사람 확인 대기 ${row.verification}개`+(row.notices?` · 공지 회차 ${row.notices}개`:'')));
         if(row.verification) {
           const verify=node('button','사이트 확인');verify.onclick=()=>openSiteVerification(row.work_id);card.append(verify);
         }
@@ -684,11 +687,11 @@
         $('source-chooser').classList.toggle('hidden',!!result.work?.host);
         $('source').replaceChildren(...result.sources.map(host=>{const option=node('option',host);option.value=host;return option;}));
         const list=$('episode-list');
-        const key=JSON.stringify([result.progress?.episode_id,result.episodes.map(chapter=>[chapter.episode_id,chapter.title,chapter.ordinal])]);
+        const key=JSON.stringify([result.progress?.episode_id,result.episodes.map(chapter=>[chapter.episode_id,chapter.title,chapter.ordinal,chapter.state==='notice'])]);
         if(key!==listKey) {
           const top=list.scrollTop,items=document.createDocumentFragment();
           for(const chapter of result.episodes) {
-            const button=node('button',chapter.title || chapter.ordinal+'화');
+            const button=node('button',(chapter.state==='notice'?'[공지 회차] ':'')+(chapter.title || chapter.ordinal+'화'));
             if(chapter.episode_id===result.progress?.episode_id) button.classList.add('current');
             button.onclick=()=>openEpisode(chapter.episode_id);items.append(button);
           }
@@ -798,6 +801,7 @@
     state.transitionFrom=advancing ? state.remote.episode_id
       : previous===episodeId ? state.transitionFrom : '';
     state.writable=!state.saveCancelled && (!state.remote || (!state.remote.deleted && (!state.remote.episode_id || state.remote.episode_id===episodeId || !!state.transitionFrom)));
+    $('content').lang=state.language==='zh'?'zh-Hans':'ko';
     show('reader'); $('content').replaceChildren(); note('reader-message','본문 불러오는 중…'); scrollTo(0,0);
     $('translation-progress').classList.add('hidden');
     progressNotice();
@@ -809,6 +813,15 @@
     history.replaceState({},'', '/app?work='+workId+'&ep='+episodeId+(language==='zh'?'&language=zh':''));
     const current=()=>state.workId===workId && state.episodeId===episodeId && state.workRequest===request && !$('reader').classList.contains('hidden');
     let pending=false, translationRequested=false;
+    function retryCollection(label) {
+      const button=node('button',label);
+      button.onclick=async()=>{
+        button.disabled=true;
+        try {await api('episode/'+workId+'/'+episodeId+'/retry',{});if(current())openEpisode(episodeId,language);}
+        catch(error){if(current()){note('reader-message',error.message);button.disabled=false;}}
+      };
+      return button;
+    }
     async function refresh() {
       if(!current())return;
       try {
@@ -846,6 +859,9 @@
           note('reader-message',state.writable?(info.translation?.state==='ready'?'번역 완료 · 저장된 한국어 본문입니다.':''):state.saveCancelled ? '저장을 취소하여 자동 저장을 멈췄습니다. 다시 저장하려면 저장 버튼을 누르세요.' : state.remote?.deleted
             ? '삭제된 기록입니다. 다시 저장하려면 저장 버튼을 누르세요.'
             : '서버에는 다른 회차가 저장되어 있습니다. 이 회차는 로컬에서만 읽습니다.');
+          // Restore the saved position once the font has set the final line breaks.
+          await document.fonts?.load('1em "Maru Buri"','한글').catch(()=>{});
+          if(!current())return;
           const ratio=!state.remote?.deleted && state.remote?.episode_id===episodeId ? Number(state.remote.position)||0 : Number(sessionStorage.getItem('readerPosition:'+workId+':'+episodeId))||0;
           requestAnimationFrame(()=>{
             if(state.workId!==workId || state.episodeId!==episodeId || state.workRequest!==request) return;
@@ -885,6 +901,11 @@
         } else if(info.episode.state==='locked') {
           note('reader-message',info.episode.error || '잠긴 회차입니다.');
           const original=node('a','원본에서 확인'); original.href=info.episode.source_url; content.append(original);
+        } else if(info.episode.state==='notice') {
+          $('reader-language').classList.add('hidden');
+          note('reader-message','공지 회차 · 제목을 기준으로 연재 공지로 분류했습니다. 다음화로 이동할 수 있습니다.');
+          const original=node('a','원본에서 확인'); original.href=info.episode.source_url;
+          content.append(original,retryCollection('본문 다시 확인'));
         } else if(info.verification) {
           verification('reader-message',info.verification,()=>openEpisode(episodeId,language));
           pending=true;poll(refresh);
@@ -893,7 +914,7 @@
           const manage=node('button','작품 관리');manage.onclick=manageScreen;content.append(manage);
         } else if(info.episode.state==='error') {
           note('reader-message',info.episode.error || '본문 수집에 실패했습니다.');
-          const retry=node('button','다시 시도'); retry.onclick=async()=>{await api('episode/'+workId+'/'+episodeId+'/retry',{});openEpisode(episodeId,language);}; content.append(retry);
+          content.append(retryCollection('다시 시도'));
           const original=node('a','원본에서 확인'); original.href=info.episode.source_url; content.append(original);
         } else {
           note('reader-message',info.job?.error || '본문 수집 중…'); pending=true;poll(refresh);

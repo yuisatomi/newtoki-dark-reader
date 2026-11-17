@@ -22,6 +22,7 @@ USER_AGENT = "ReaderSync/1.0"
 EPISODE_PATH = re.compile(r"^/novel/([0-9]+)/([0-9]+)$")
 WORK_PATH = re.compile(r"^/novel/([0-9]+)(?:/([0-9]+))?/?$")
 VERIFICATION_WAIT_MS = 30000
+NO_EPISODE_BODY = '본문을 찾지 못했습니다.'
 BROWSER_SHADOW_CAPTURE = """
       (() => { const original = Element.prototype.attachShadow;
         Element.prototype.attachShadow = function(options) {
@@ -505,7 +506,7 @@ def extract_episode(browser, url, work_id, episode_id):
               return root.textContent.split(/\n+/).map(s=>s.trim()).filter(s=>s && !/^[(（]本章完[)）]$/.test(s));
             }''')
             if not paragraphs or sum(map(len, paragraphs)) < 80:
-                raise CrawlUnavailable('본문을 찾지 못했습니다.')
+                raise CrawlUnavailable(NO_EPISODE_BODY)
             return paragraphs
         cfg = page.locator("#theme-novel-viewer-data")
         if cfg.count():
@@ -529,5 +530,5 @@ def extract_episode(browser, url, work_id, episode_id):
           return clone.textContent.split(/\\n+/).map(s => s.trim()).filter(Boolean);
         }""")
         if not paragraphs or sum(map(len, paragraphs)) < 80:
-            raise CrawlUnavailable("본문을 찾지 못했습니다.")
+            raise CrawlUnavailable(NO_EPISODE_BODY)
         return paragraphs

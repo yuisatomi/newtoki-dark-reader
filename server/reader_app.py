@@ -17,13 +17,17 @@ import reader_translate
 import reader_usage
 import reader_verification
 
-from reader_crawl import (CrawlUnavailable, HumanVerificationRequired, LockedChapter,
+from reader_crawl import (CrawlUnavailable, HumanVerificationRequired, LockedChapter, NO_EPISODE_BODY,
                           HOSTS, SHUBA_HOSTS, WORK_ID_PATTERN, checked_host, supported_host, checked_url,
                           collect_episode_list, extract_episode, source_browser, shuba_work, valid_work_id, work_url,
                           ready_verification_pages, chronological_shuba_chapters)
 
 
 HTML_PATH = Path(__file__).with_name("reader_app.html")
+FONT_ASSETS = {
+    'MaruBuri-Regular.woff2': 'font/woff2',
+    'MaruBuri-OFL.txt': 'text/plain; charset=utf-8',
+}
 WORK_PATH = re.compile(rf"^/app/api/work/({WORK_ID_PATTERN})$")
 SOURCE_PATH = re.compile(rf"^/app/api/work/({WORK_ID_PATTERN})/source$")
 REFRESH_PATH = re.compile(rf"^/app/api/work/({WORK_ID_PATTERN})/refresh$")
@@ -33,6 +37,30 @@ EPISODE_PATH = re.compile(rf"^/app/api/episode/({WORK_ID_PATTERN})/([0-9]{{1,128
 RETRY_PATH = re.compile(rf"^/app/api/episode/({WORK_ID_PATTERN})/([0-9]{{1,128}})/retry$")
 TRANSLATE_PATH = re.compile(rf"^/app/api/episode/({WORK_ID_PATTERN})/([0-9]{{1,128}})/translate$")
 BACKUP_LIMIT = 32 * 1024 * 1024
+CHAPTER_NUMBER = re.compile(r'^\s*(?:第\s*\d+\s*章|(?:제\s*)?\d+\s*(?:화|회(?:차)?))\s*[:：.·-]?\s*')
+NOTICE_TITLE = re.compile(r'''
+    ^(?:
+        (?:\[(?:공지|연재\s*공지|휴재\s*공지)\]|[【\[](?:公告|通知|[请請]假[条條])[】\]])
+      | (?:공지(?:사항)?|(?:작가|연재|휴재|업로드)\s*공지|(?:연재\s*일정|휴재)\s*안내
+          | 公告|更新公告|停更通知|[请請]假(?:[条條]|[一二两兩三四五六七八九十\d]+天))(?=$|\s*[:：,，。!?！？])
+      | (?:今天晚上|今晚|晚上|今天|今日)(?:只有|只能)[一二两兩三四五六七八九十\d]+更(?=$|[了啦\s,，。!?！？])
+      | (?:今天晚上|今晚|今天|今日)(?:有[点點]急事\s*[,，、]?\s*)?(?:要|想)?[请請]假[一二两兩三四五六七八九十\d]+天(?=$|[\s,，。!?！？])
+      | (?:新年快[乐樂]|元宵[节節](?:情人[节節])?快[乐樂]|情人[节節]快[乐樂])[!！。\s]*$
+    )
+''', re.VERBOSE)
+
+
+def is_notice(episode):
+    # shortcut: classify only explicit title patterns after a missing-body error; keep ambiguous titles retryable.
+    return (episode['state'] == 'error' and episode['error'] == NO_EPISODE_BODY
+            and bool(NOTICE_TITLE.match(CHAPTER_NUMBER.sub('', episode['title'].strip()))))
+
+
+def reader_episode(episode):
+    result = dict(episode)
+    if is_notice(episode):
+        result.update(state='notice', error='')
+    return result
 
 
 def memory_usage():
@@ -424,6 +452,26 @@ def resume_completed_verifications(connect):
 
 def handle_get(handler, connect, token):
     path = urlparse(handler.path).path
+    if path.startswith('/app/fonts/'):
+        name = path.removeprefix('/app/fonts/')
+        if name not in FONT_ASSETS:
+            respond(handler, 404, {'error': 'not found'})
+            return
+        try:
+            body = (HTML_PATH.parent / 'fonts' / name).read_bytes()
+        except FileNotFoundError:
+            respond(handler, 404, {'error': 'not found'})
+            return
+        handler.send_response(200)
+        handler.send_header('Content-Type', FONT_ASSETS[name])
+        handler.send_header('Content-Length', str(len(body)))
+        handler.send_header('Cache-Control', 'public, max-age=86400')
+        handler.send_header('X-Content-Type-Options', 'nosniff')
+        if name.endswith('.woff2'):
+            handler.send_header('Link', '</app/fonts/MaruBuri-OFL.txt>; rel="license"')
+        handler.end_headers()
+        handler.wfile.write(body)
+        return
     if path in ("/app", "/app/", "/app/manage"):
         body = HTML_PATH.read_bytes()
         handler.send_response(200)
@@ -467,6 +515,7 @@ def handle_get(handler, connect, token):
             respond(handler, 200, backup)
             return
         if path == '/app/api/manage':
+            db.execute('BEGIN')
             rows = db.execute("""WITH works AS (
                 SELECT work_id FROM reader_works UNION SELECT work_id FROM reader_episodes
                 UNION SELECT work_id FROM reader_jobs
@@ -498,13 +547,26 @@ def handle_get(handler, connect, token):
                 LEFT JOIN reader_work_settings s ON s.work_id=k.work_id
                 ORDER BY title,k.work_id""").fetchall()
             works = [dict(row) for row in rows]
+            notices = {}
+            for row in db.execute("""SELECT e.work_id,e.title,e.state,e.error,j.state AS job_state
+                FROM reader_episodes e LEFT JOIN reader_jobs j USING(work_id,episode_id)
+                WHERE e.state='error' AND e.error=?""", (NO_EPISODE_BODY,)):
+                if is_notice(row):
+                    counts = notices.setdefault(row['work_id'], {'episodes': 0, 'jobs': 0})
+                    counts['episodes'] += 1
+                    counts['jobs'] += row['job_state'] == 'error'
             for item in works:
+                counts = notices.get(item['work_id'], {'episodes': 0, 'jobs': 0})
+                item['notices'] = counts['episodes']
+                item['failed'] -= counts['episodes']
+                item['errors'] -= counts['jobs']
                 item['sources'] = source_hosts(db, item['work_id'])
                 item['translated'] = db.execute("SELECT count(DISTINCT episode_id) FROM reader_translations WHERE work_id=? AND state='ready'", (item['work_id'],)).fetchone()[0]
                 item['translation_bytes'] = reader_translate.stored_bytes(db, item['work_id'])
                 item['bytes'] += item['translation_bytes']
                 if shuba_work(item['work_id']):
                     item['glossary'] = reader_translate.glossary(db, item['work_id'])
+            db.commit()
             respond(handler, 200, {'works': works, 'sources': source_hosts(db)})
             return
         if path == '/app/api/devices':
@@ -544,7 +606,7 @@ def handle_get(handler, connect, token):
             respond(handler, 200, {"work": dict(work) if work else None,
                                    "sources": source_hosts(db, work_id),
                                    "progress": dict(progress) if progress else None,
-                                   "episodes": [dict(row) for row in episodes],
+                                   "episodes": [reader_episode(row) for row in episodes],
                                    "list_job": dict(job) if job else None,
                                    "paused": bool(work_settings(db, work_id)['paused']),
                                    "verification": verification_message(db, work_id)})
@@ -562,7 +624,7 @@ def handle_get(handler, connect, token):
                 return
             queue_prefetch(db, work_id, episode_id)
             job = db.execute("SELECT state,error FROM reader_jobs WHERE work_id=? AND episode_id=?", (work_id, episode_id)).fetchone()
-            result = dict(row)
+            result = reader_episode(row)
             content = result.pop("paragraphs_json")
             result["paragraphs"] = json.loads(content) if content else None
             translation = reader_translate.status(db, row) if shuba_work(work_id) else None
@@ -755,11 +817,18 @@ def handle_post(handler, connect, token, store_progress, delete_progress):
                 save_settings(db, work_id, settings)
                 db.execute("UPDATE reader_work_settings SET translation_anchor='' WHERE work_id=?", (work_id,))
             else:
-                rows = db.execute("""SELECT episode_id FROM reader_jobs WHERE work_id=? AND state='error'
-                    UNION SELECT episode_id FROM reader_episodes WHERE work_id=? AND state='error'""", (work_id, work_id)).fetchall()
+                rows = db.execute("""WITH failed AS (
+                    SELECT episode_id FROM reader_jobs WHERE work_id=? AND state='error'
+                    UNION SELECT episode_id FROM reader_episodes WHERE work_id=? AND state='error'
+                ) SELECT f.episode_id,e.title,e.state,e.error FROM failed f
+                LEFT JOIN reader_episodes e ON e.work_id=? AND e.episode_id=f.episode_id""",
+                                  (work_id, work_id, work_id)).fetchall()
                 for row in rows:
+                    if is_notice(row):
+                        continue
                     enqueue(db, work_id, row['episode_id'], force=True)
-                db.execute("UPDATE reader_episodes SET state='missing',error='' WHERE work_id=? AND state='error'", (work_id,))
+                    db.execute("UPDATE reader_episodes SET state='missing',error='' WHERE work_id=? AND episode_id=? AND state='error'",
+                               (work_id, row['episode_id']))
         respond(handler, 200, {'ok': True})
         return
     if path == '/app/api/manage/delete':
